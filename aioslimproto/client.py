@@ -8,7 +8,7 @@ https://github.com/winjer/squeal/blob/master/src/squeal/net/slimproto.py
 from __future__ import annotations
 
 import asyncio
-from asyncio import StreamReader, StreamWriter, create_task
+from asyncio import StreamReader, StreamWriter, create_task, timeout
 from collections.abc import Callable
 from datetime import datetime
 import ipaddress
@@ -18,8 +18,6 @@ import struct
 import time
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
-
-from async_timeout import timeout
 
 from .const import (
     FALLBACK_CODECS,
