@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from asyncio import StreamReader, StreamWriter, create_task, timeout
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime
 import ipaddress
 import logging
@@ -102,6 +103,8 @@ class SlimClient:
 
     def disconnect(self) -> None:
         """Disconnect and/or cleanup socket client."""
+        if not self._connected:
+            return  # Already disconnected
         self._connected = False
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
@@ -109,9 +112,25 @@ class SlimClient:
             self._heartbeat_task.cancel()
 
         if self._writer.can_write_eof():
-            self._writer.write_eof()
+            with suppress(OSError):
+                self._writer.write_eof()
         if not self._writer.is_closing():
             self._writer.close()
+        # Schedule async cleanup for proper resource release
+        asyncio.create_task(self._async_cleanup())
+
+    async def _async_cleanup(self) -> None:
+        """Perform async cleanup of resources."""
+        # Wait for cancelled tasks to complete
+        if self._reader_task and not self._reader_task.done():
+            with suppress(asyncio.CancelledError):
+                await self._reader_task
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            with suppress(asyncio.CancelledError):
+                await self._heartbeat_task
+        # Wait for writer to close properly
+        with suppress(Exception):
+            await self._writer.wait_closed()
 
     async def configure_display(
         self,

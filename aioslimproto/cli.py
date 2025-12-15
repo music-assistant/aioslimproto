@@ -292,6 +292,11 @@ class SlimProtoCLI:
             self.logger.debug("Error handling CLI command", exc_info=err)
         finally:
             self.logger.debug("Client disconnected from Telnet CLI")
+            # Properly close the writer to release socket resources
+            if not writer.is_closing():
+                writer.close()
+                with suppress(Exception):
+                    await writer.wait_closed()
 
     async def _handle_jsonrpc_client(self, request: web.Request) -> web.Response:
         """Handle request on JSON-RPC endpoint."""
@@ -311,7 +316,9 @@ class SlimProtoCLI:
         # return the response to the client
         return web.json_response(result)
 
-    async def _handle_cometd_client(self, request: web.Request) -> web.Response:
+    async def _handle_cometd_client(  # noqa: PLR0912, C901
+        self, request: web.Request
+    ) -> web.Response:
         """
         Handle CometD request on the json CLI.
 
@@ -593,15 +600,29 @@ class SlimProtoCLI:
 
         # keep delivering messages to the client until it disconnects
         # keep sending messages/events from the client's queue
-        while True:
-            # make sure we always send an array of messages
-            msg = [await cometd_client.queue.get()]
-            try:
-                chunk = json.dumps(msg).encode("utf8")
-                await resp.write(chunk)
-                cometd_client.last_seen = int(time.time())
-            except ConnectionResetError:
-                break
+        try:
+            while True:
+                # make sure we always send an array of messages
+                msg = [await cometd_client.queue.get()]
+                try:
+                    chunk = json.dumps(msg).encode("utf8")
+                    await resp.write(chunk)
+                    cometd_client.last_seen = int(time.time())
+                except (
+                    ConnectionResetError,
+                    ConnectionError,
+                    BrokenPipeError,
+                    RuntimeError,
+                ):
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Clean up the client when the streaming connection ends
+            logger.debug("CometD streaming connection ended for client: %s", clientid)
+            if clientid in self._cometd_clients:
+                client = self._cometd_clients.pop(clientid)
+                empty_queue(client.queue)
         return resp
 
     def _handle_cometd_client_request(
@@ -616,15 +637,24 @@ class SlimProtoCLI:
         """
 
         async def _handle() -> None:
-            result = await self._handle_command(cometd_request["data"]["request"])
-            await client.queue.put(
-                {
-                    "channel": cometd_request["data"]["response"],
-                    "id": cometd_request["id"],
-                    "data": result,
-                    "ext": {"priority": cometd_request["data"].get("priority")},
-                },
-            )
+            try:
+                result = await self._handle_command(cometd_request["data"]["request"])
+                await client.queue.put(
+                    {
+                        "channel": cometd_request["data"]["response"],
+                        "id": cometd_request["id"],
+                        "data": result,
+                        "ext": {"priority": cometd_request["data"].get("priority")},
+                    },
+                )
+            except asyncio.CancelledError:
+                pass  # Task was cancelled, clean exit
+            except Exception as err:  # noqa: BLE001
+                self.logger.debug(
+                    "Error handling CometD request: %s",
+                    err,
+                    exc_info=err,
+                )
 
         asyncio.create_task(_handle())
 

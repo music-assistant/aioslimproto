@@ -84,11 +84,15 @@ class SlimServer:
 
     async def stop(self) -> None:
         """Stop running the server."""
+        # Disconnect all clients and give them time to complete async cleanup
         for client in list(self._players.values()):
             client.disconnect()
+        # Allow async cleanup tasks to run
+        await asyncio.sleep(0.1)
         self._players = {}
         if self._server:
             self._server.close()
+            await self._server.wait_closed()
         if self._discovery:
             self._discovery.close()
         await self.cli.stop()
