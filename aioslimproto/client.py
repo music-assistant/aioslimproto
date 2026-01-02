@@ -97,6 +97,7 @@ class SlimClient:
         self._connected: bool = False
         self._last_heartbeat = 0
         self._auto_play: bool = False
+        self._enqueue_pending: bool = False
         self._reader_task = create_task(self._socket_reader())
         self._heartbeat_task: asyncio.Task | None = None
         self._presets: list[Preset] = []
@@ -414,6 +415,14 @@ class SlimClient:
             await self._send_strm(b"f", autostart=b"0")
             await self._send_strm(b"q", flags=0)
 
+        # Log what we're about to do with next_media
+        if self._next_media:
+            self.logger.debug(
+                "play_url: Overwriting _next_media (was: %s, enqueue_pending: %s)",
+                self._next_media.metadata.get("queue_item_id") or self._next_media.url[:80],
+                self._enqueue_pending,
+            )
+
         self._next_media = MediaDetails(
             url=url,
             mime_type=mime_type,
@@ -421,10 +430,21 @@ class SlimClient:
             transition=transition,
             transition_duration=transition_duration,
         )
+        self.logger.debug(
+            "play_url: Set _next_media to %s (enqueue=%s)",
+            metadata.get("queue_item_id") if metadata else url[:80],
+            enqueue,
+        )
         self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
         if enqueue:
+            # Track is being enqueued for later playback
+            self._enqueue_pending = True
+            self.logger.debug("play_url: Set enqueue_pending=True")
             return
+        # Track will play immediately - clear enqueue flag
+        self._enqueue_pending = False
+        self.logger.debug("play_url: Set enqueue_pending=False")
         # power on if we're not already powered
         if not self._powered:
             await self.power(powered=True)
@@ -806,16 +826,15 @@ class SlimClient:
         self.logger.debug("STMc received - connected.")
         # srtm-s command received. Guaranteed to be the first response to an strm-s.
         self._state = PlayerState.BUFFERING
-        self._current_media = self._next_media
-        self._next_media = None
-        self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
 
     def _process_stat_stmd(self, data: bytes) -> None:
         """Process incoming stat STMd message (decoder ready)."""
         self.logger.debug("STMd received - decoder ready.")
         if self._next_media:
+            self.logger.info("Starting next enqueued media. %s", self._next_media.url)
             # a next url has been enqueued
+            # Note: play_url with enqueue=False will clear the enqueue_pending flag
             asyncio.create_task(
                 self.play_url(
                     url=self._next_media.url,
@@ -868,6 +887,26 @@ class SlimClient:
         """Process incoming stat STMs message: Playback of new track has started."""
         self.logger.debug("STMs received - playback of new track has started")
         self._state = PlayerState.PLAYING
+        # Only update current_media if this is NOT an enqueued track buffering in background
+        # enqueue_pending is True when track was enqueued but not yet played
+        # enqueue_pending is False when track is being played immediately (fresh start, seek, or transition)
+        self.logger.debug(
+            "STMs: enqueue_pending=%s, next_media=%s, current_media=%s",
+            self._enqueue_pending,
+            self._next_media.metadata.get("queue_item_id") if self._next_media else None,
+            self._current_media.metadata.get("queue_item_id") if self._current_media else None,
+        )
+        if not self._enqueue_pending and self._next_media:
+            self.logger.debug(
+                "STMs: Updating current_media from %s to %s",
+                self._current_media.metadata.get("queue_item_id") if self._current_media else None,
+                self._next_media.metadata.get("queue_item_id"),
+            )
+            self._current_media = self._next_media
+            self._next_media = None
+            self.extra_data["playlist_timestamp"] = int(time.time())
+        else:
+            self.logger.debug("STMs: NOT updating current_media (enqueue_pending or no next_media)")
         self.signal_update()
         await self._render_display("playback_start")
 
