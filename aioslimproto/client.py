@@ -428,7 +428,6 @@ class SlimClient:
             self._enqueue_pending = True
             return
         self._enqueue_pending = False
-        self.logger.debug("play_url: Set enqueue_pending=False")
         # power on if we're not already powered
         if not self._powered:
             await self.power(powered=True)
