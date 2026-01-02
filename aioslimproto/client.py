@@ -94,10 +94,10 @@ class SlimClient:
         self._elapsed_milliseconds: float = 0
         self._current_media: MediaDetails | None = None
         self._next_media: MediaDetails | None = None
+        self._enqueued_media: MediaDetails | None = None
         self._connected: bool = False
         self._last_heartbeat = 0
         self._auto_play: bool = False
-        self._enqueue_pending: bool = False
         self._reader_task = create_task(self._socket_reader())
         self._heartbeat_task: asyncio.Task | None = None
         self._presets: list[Preset] = []
@@ -407,6 +407,19 @@ class SlimClient:
         - send_flush: advanced option to flush the buffer before playback.
         """
         self.logger.debug("play url (enqueue: %s): %s", enqueue, url)
+
+        # Log detailed information to distinguish seek vs transition
+        current_item = self._current_media.metadata.get("item_id") if self._current_media else None
+        new_item = metadata.get("item_id") if metadata else None
+        self.logger.debug(
+            "play_url: current_item=%s, new_item=%s, enqueue=%s, send_flush=%s, state=%s",
+            current_item[:60] if current_item else None,
+            new_item[:60] if new_item else None,
+            enqueue,
+            send_flush,
+            self._state,
+        )
+
         if not url.startswith("http"):
             raise UnsupportedContentType(f"Invalid URL: {url}")  # noqa: TRY003
 
@@ -414,20 +427,23 @@ class SlimClient:
             # flush buffers before playback of a new track
             await self._send_strm(b"f", autostart=b"0")
             await self._send_strm(b"q", flags=0)
+            self._enqueued_media = None
 
-        self._next_media = MediaDetails(
+        media_details = MediaDetails(
             url=url,
             mime_type=mime_type,
             metadata=metadata or {},
             transition=transition,
             transition_duration=transition_duration,
         )
+        if enqueue:
+            self._enqueued_media = media_details
+            self.extra_data["playlist_timestamp"] = int(time.time())
+            self.signal_update()
+            return
+        self._next_media = media_details
         self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
-        if enqueue:
-            self._enqueue_pending = True
-            return
-        self._enqueue_pending = False
         # power on if we're not already powered
         if not self._powered:
             await self.power(powered=True)
@@ -814,15 +830,17 @@ class SlimClient:
     def _process_stat_stmd(self, data: bytes) -> None:
         """Process incoming stat STMd message (decoder ready)."""
         self.logger.debug("STMd received - decoder ready.")
-        if self._next_media:
+        if self._enqueued_media:
             # a next url has been enqueued
+            enqueued_media = self._enqueued_media
+            self._enqueued_media = None
             asyncio.create_task(
                 self.play_url(
-                    url=self._next_media.url,
-                    mime_type=self._next_media.mime_type,
-                    metadata=self._next_media.metadata,
-                    transition=self._next_media.transition,
-                    transition_duration=self._next_media.transition_duration,
+                    url=enqueued_media.url,
+                    mime_type=enqueued_media.mime_type,
+                    metadata=enqueued_media.metadata,
+                    transition=enqueued_media.transition,
+                    transition_duration=enqueued_media.transition_duration,
                     enqueue=False,
                     autostart=True,
                     send_flush=False,
@@ -868,9 +886,8 @@ class SlimClient:
         """Process incoming stat STMs message: Playback of new track has started."""
         self.logger.debug("STMs received - playback of new track has started")
         self._state = PlayerState.PLAYING
-        if not self._enqueue_pending and self._next_media:
+        if self._next_media:
             self._current_media = self._next_media
-            self._next_media = None
             self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
         await self._render_display("playback_start")
@@ -904,7 +921,6 @@ class SlimClient:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
         self.logger.debug("STMu received - end of playback.")
         self._state = PlayerState.STOPPED
-        # invalidate url/metadata
         self._current_media = None
         self._next_media = None
         self.extra_data["playlist_timestamp"] = int(time.time())
