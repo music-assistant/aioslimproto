@@ -408,18 +408,6 @@ class SlimClient:
         """
         self.logger.debug("play url (enqueue: %s): %s", enqueue, url)
 
-        # Log detailed information to distinguish seek vs transition
-        current_item = self._current_media.metadata.get("item_id") if self._current_media else None
-        new_item = metadata.get("item_id") if metadata else None
-        self.logger.debug(
-            "play_url: current_item=%s, new_item=%s, enqueue=%s, send_flush=%s, state=%s",
-            current_item[:60] if current_item else None,
-            new_item[:60] if new_item else None,
-            enqueue,
-            send_flush,
-            self._state,
-        )
-
         if not url.startswith("http"):
             raise UnsupportedContentType(f"Invalid URL: {url}")  # noqa: TRY003
 
@@ -921,6 +909,7 @@ class SlimClient:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
         self.logger.debug("STMu received - end of playback.")
         self._state = PlayerState.STOPPED
+        # invalidate url/metadata
         self._current_media = None
         self._buffering_media = None
         self._next_media = None
