@@ -887,26 +887,9 @@ class SlimClient:
         """Process incoming stat STMs message: Playback of new track has started."""
         self.logger.debug("STMs received - playback of new track has started")
         self._state = PlayerState.PLAYING
-        # Only update current_media if this is NOT an enqueued track buffering in background
-        # enqueue_pending is True when track was enqueued but not yet played
-        # enqueue_pending is False when track is being played immediately (fresh start, seek, or transition)
-        self.logger.debug(
-            "STMs: enqueue_pending=%s, next_media=%s, current_media=%s",
-            self._enqueue_pending,
-            self._next_media.metadata.get("queue_item_id") if self._next_media else None,
-            self._current_media.metadata.get("queue_item_id") if self._current_media else None,
-        )
         if not self._enqueue_pending and self._next_media:
-            self.logger.debug(
-                "STMs: Updating current_media from %s to %s",
-                self._current_media.metadata.get("queue_item_id") if self._current_media else None,
-                self._next_media.metadata.get("queue_item_id"),
-            )
             self._current_media = self._next_media
-            self._next_media = None
             self.extra_data["playlist_timestamp"] = int(time.time())
-        else:
-            self.logger.debug("STMs: NOT updating current_media (enqueue_pending or no next_media)")
         self.signal_update()
         await self._render_display("playback_start")
 
