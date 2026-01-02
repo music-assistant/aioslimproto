@@ -415,14 +415,6 @@ class SlimClient:
             await self._send_strm(b"f", autostart=b"0")
             await self._send_strm(b"q", flags=0)
 
-        # Log what we're about to do with next_media
-        if self._next_media:
-            self.logger.debug(
-                "play_url: Overwriting _next_media (was: %s, enqueue_pending: %s)",
-                self._next_media.metadata.get("queue_item_id") or self._next_media.url[:80],
-                self._enqueue_pending,
-            )
-
         self._next_media = MediaDetails(
             url=url,
             mime_type=mime_type,
@@ -430,19 +422,11 @@ class SlimClient:
             transition=transition,
             transition_duration=transition_duration,
         )
-        self.logger.debug(
-            "play_url: Set _next_media to %s (enqueue=%s)",
-            metadata.get("queue_item_id") if metadata else url[:80],
-            enqueue,
-        )
         self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
         if enqueue:
-            # Track is being enqueued for later playback
             self._enqueue_pending = True
-            self.logger.debug("play_url: Set enqueue_pending=True")
             return
-        # Track will play immediately - clear enqueue flag
         self._enqueue_pending = False
         self.logger.debug("play_url: Set enqueue_pending=False")
         # power on if we're not already powered
@@ -832,9 +816,7 @@ class SlimClient:
         """Process incoming stat STMd message (decoder ready)."""
         self.logger.debug("STMd received - decoder ready.")
         if self._next_media:
-            self.logger.info("Starting next enqueued media. %s", self._next_media.url)
             # a next url has been enqueued
-            # Note: play_url with enqueue=False will clear the enqueue_pending flag
             asyncio.create_task(
                 self.play_url(
                     url=self._next_media.url,
