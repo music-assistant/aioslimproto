@@ -93,8 +93,8 @@ class SlimClient:
         self._last_timestamp: float = 0
         self._elapsed_milliseconds: float = 0
         self._current_media: MediaDetails | None = None
+        self._buffering_media: MediaDetails | None = None
         self._next_media: MediaDetails | None = None
-        self._enqueued_media: MediaDetails | None = None
         self._connected: bool = False
         self._last_heartbeat = 0
         self._auto_play: bool = False
@@ -427,7 +427,6 @@ class SlimClient:
             # flush buffers before playback of a new track
             await self._send_strm(b"f", autostart=b"0")
             await self._send_strm(b"q", flags=0)
-            self._enqueued_media = None
 
         media_details = MediaDetails(
             url=url,
@@ -437,11 +436,11 @@ class SlimClient:
             transition_duration=transition_duration,
         )
         if enqueue:
-            self._enqueued_media = media_details
+            self._next_media = media_details
             self.extra_data["playlist_timestamp"] = int(time.time())
             self.signal_update()
             return
-        self._next_media = media_details
+        self._buffering_media = media_details
         self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
         # power on if we're not already powered
@@ -472,7 +471,7 @@ class SlimClient:
                 "HTTPS stream requested but player does not support HTTPS, "
                 "trying HTTP instead but playback may fail.",
             )
-            self._next_media.url = url.replace("https", "http")
+            self._buffering_media.url = url.replace("https", "http")
             scheme = "http"
             port = 80
 
@@ -830,10 +829,10 @@ class SlimClient:
     def _process_stat_stmd(self, data: bytes) -> None:
         """Process incoming stat STMd message (decoder ready)."""
         self.logger.debug("STMd received - decoder ready.")
-        if self._enqueued_media:
+        if self._next_media:
             # a next url has been enqueued
-            enqueued_media = self._enqueued_media
-            self._enqueued_media = None
+            enqueued_media = self._next_media
+            self._next_media = None
             asyncio.create_task(
                 self.play_url(
                     url=enqueued_media.url,
@@ -886,8 +885,9 @@ class SlimClient:
         """Process incoming stat STMs message: Playback of new track has started."""
         self.logger.debug("STMs received - playback of new track has started")
         self._state = PlayerState.PLAYING
-        if self._next_media:
-            self._current_media = self._next_media
+        if self._buffering_media:
+            self._current_media = self._buffering_media
+            self._buffering_media = None
             self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
         await self._render_display("playback_start")
@@ -922,6 +922,7 @@ class SlimClient:
         self.logger.debug("STMu received - end of playback.")
         self._state = PlayerState.STOPPED
         self._current_media = None
+        self._buffering_media = None
         self._next_media = None
         self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
@@ -979,10 +980,10 @@ class SlimClient:
         # parse ICY metadata
         if (
             "icy-name" in headers
-            and self._next_media
-            and not self._next_media.metadata.get("title")
+            and self._buffering_media
+            and not self._buffering_media.metadata.get("title")
         ):
-            self._next_media.metadata["title"] = headers["icy-name"]
+            self._buffering_media.metadata["title"] = headers["icy-name"]
 
         # send continue (used when autoplay 1 or 3)
         if self._auto_play:
