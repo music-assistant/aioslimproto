@@ -870,6 +870,7 @@ class SlimClient:
         self._state = PlayerState.PLAYING
         if not self._enqueue_pending and self._next_media:
             self._current_media = self._next_media
+            self._next_media = None
             self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
         await self._render_display("playback_start")
