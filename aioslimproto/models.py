@@ -140,12 +140,13 @@ class ButtonCode(IntEnum):
 
 
 PCM_SAMPLE_SIZE = {
-    # Map with sample sizes used in slimproto."""
+    # The protocol uses: sample_size_bytes = char_value - '0' + 1
+    # '0'=1 byte (8-bit), '1'=2 bytes (16-bit)
+    # '2'=3 bytes (24-bit), '3'=4 bytes (32-bit)
     8: b"0",
     16: b"1",
-    20: b"2",
+    24: b"2",
     32: b"3",
-    24: b"4",
     0: b"?",
 }
 
