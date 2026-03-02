@@ -415,6 +415,7 @@ class SlimClient:
             # flush buffers before playback of a new track
             await self._send_strm(b"f", autostart=b"0")
             await self._send_strm(b"q", flags=0)
+            self._next_media = None
 
         media_details = MediaDetails(
             url=url,
@@ -951,6 +952,11 @@ class SlimClient:
 
         if status_code > 300:
             self.logger.error("Server responds with status %s %s", status_code, status)
+            self._state = PlayerState.STOPPED
+            self._current_media = None
+            self._buffering_media = None
+            self._next_media = None
+            self.signal_update()
             return
 
         if "content-type" in headers:
