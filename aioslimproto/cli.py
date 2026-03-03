@@ -66,11 +66,14 @@ class CometDClient:
 
     client_id: str
     player_id: str = ""
-    queue: asyncio.Queue[CometDResponse] = field(default_factory=asyncio.Queue)
+    queue: asyncio.Queue[CometDResponse] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=50)
+    )
     last_seen: int = int(time.time())
     first_event: CometDResponse | None = None
     meta_subscriptions: set[str] = field(default_factory=set)
     slim_subscriptions: dict[str, SlimSubscribeMessage] = field(default_factory=dict)
+    streaming: bool = False
 
 
 def parse_value(raw_value: int | str) -> int | str | tuple[str, int | str]:
@@ -375,7 +378,7 @@ class SlimProtoCLI:
                             "error": "invalid clientId",
                             "advice": {
                                 "reconnect": "handshake",
-                                "interval": 0,
+                                "interval": 2000,
                             },
                         },
                     ],
@@ -416,6 +419,7 @@ class SlimProtoCLI:
                 # (re)connect message
                 logger.debug("Client (re-)connected: %s", clientid)
                 streaming = cometd_msg["connectionType"] == "streaming"
+                cometd_client.streaming = streaming
                 # confirm the connection
                 response.append(
                     {
@@ -581,8 +585,24 @@ class SlimProtoCLI:
             "Expires": "-1",
             "Connection": "keep-alive",
         }
-        # regular command/handshake messages are just replied and connection closed
         if not streaming:
+            # Long-polling mode: if we don't already have queued data messages,
+            # hold the connection open until a message arrives or timeout (30s).
+            if not any(
+                msg for msg in response if msg.get("channel", "").startswith("/slim/")
+            ):
+                try:
+                    msg = await asyncio.wait_for(cometd_client.queue.get(), timeout=30)
+                    response.append(msg)
+                    # drain any additional messages that arrived
+                    while True:
+                        try:
+                            response.append(cometd_client.queue.get_nowait())
+                        except asyncio.QueueEmpty:
+                            break
+                except (TimeoutError, asyncio.CancelledError):
+                    pass
+            cometd_client.last_seen = int(time.time())
             return web.json_response(response, headers=headers)
 
         # streaming mode: send messages from the queue to the client
@@ -639,14 +659,15 @@ class SlimProtoCLI:
         async def _handle() -> None:
             try:
                 result = await self._handle_command(cometd_request["data"]["request"])
-                await client.queue.put(
-                    {
-                        "channel": cometd_request["data"]["response"],
-                        "id": cometd_request["id"],
-                        "data": result,
-                        "ext": {"priority": cometd_request["data"].get("priority")},
-                    },
-                )
+                with suppress(asyncio.QueueFull):
+                    client.queue.put_nowait(
+                        {
+                            "channel": cometd_request["data"]["response"],
+                            "id": cometd_request["id"],
+                            "data": result,
+                            "ext": {"priority": cometd_request["data"].get("priority")},
+                        },
+                    )
             except asyncio.CancelledError:
                 pass  # Task was cancelled, clean exit
             except Exception as err:  # noqa: BLE001
@@ -1201,19 +1222,20 @@ class SlimProtoCLI:
             )
         ):
             menu = await self._handle_menu(event.player_id)
-            await client.queue.put(
-                {
-                    "channel": sub["data"]["response"],
-                    "id": sub["id"],
-                    "data": [
-                        event.player_id,
-                        menu["item_loop"],
-                        "replace",
-                        event.player_id,
-                    ],
-                    "ext": {"priority": sub["data"].get("priority")},
-                },
-            )
+            with suppress(asyncio.QueueFull):
+                client.queue.put_nowait(
+                    {
+                        "channel": sub["data"]["response"],
+                        "id": sub["id"],
+                        "data": [
+                            event.player_id,
+                            menu["item_loop"],
+                            "replace",
+                            event.player_id,
+                        ],
+                        "ext": {"priority": sub["data"].get("priority")},
+                    },
+                )
 
     async def _do_periodic(self) -> None:
         """Execute periodic sending of state and cleanup."""
@@ -1221,15 +1243,19 @@ class SlimProtoCLI:
             # cleanup orphaned clients
             disconnected_clients = set()
             for cometd_client in self._cometd_clients.values():
-                if (time.time() - cometd_client.last_seen) > 80:
+                stale_threshold = 80 if cometd_client.streaming else 45
+                if (time.time() - cometd_client.last_seen) > stale_threshold:
                     disconnected_clients.add(cometd_client.client_id)
                     continue
             for clientid in disconnected_clients:
                 client = self._cometd_clients.pop(clientid)
                 empty_queue(client.queue)
                 self.logger.debug("Cleaned up disconnected CometD Client: %s", clientid)
-            # handle client subscriptions
+            # handle client subscriptions (only for streaming clients;
+            # long-polling clients get subscription data on their next connect)
             for cometd_client in self._cometd_clients.values():
+                if not cometd_client.streaming:
+                    continue
                 for sub in cometd_client.slim_subscriptions.values():
                     self._handle_cometd_client_request(cometd_client, sub)
 
