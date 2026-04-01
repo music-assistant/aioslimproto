@@ -50,6 +50,17 @@ DEVICE_TYPE = {
     100: "squeezeesp32",
 }
 
+# Software player types that use SqueezePlay volume parameters
+# (wider -74dB range with two-slope curve) instead of hardware Squeezebox2 defaults.
+SOFTWARE_PLAYER_TYPES: frozenset[str] = frozenset(
+    {
+        "squeezeplay",
+        "softsqueeze",
+        "softsqueeze3",
+        "softboom",
+    }
+)
+
 
 class PlayerState(Enum):
     """Enum with the possible player states."""

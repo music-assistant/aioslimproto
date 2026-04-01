@@ -123,18 +123,25 @@ class SlimProtoVolume:
         128,
     ]
 
-    # new gain parameters, from the same place
-    total_volume_range: int = -50  # dB
-    step_point: int = (
-        -1
-    )  # Number of steps, up from the bottom, where a 2nd volume ramp kicks in.
-    step_fraction: int = (
-        1  # fraction of totalVolumeRange where alternate volume ramp kicks in.
-    )
+    def __init__(
+        self,
+        total_volume_range: int = -50,
+        step_point: int = -1,
+        step_fraction: float = 1,
+    ) -> None:
+        """Initialize class.
 
-    def __init__(self) -> None:
-        """Initialize class."""
+        :param total_volume_range: Total volume range in dB
+            (e.g. -50 for hardware, -74 for software players).
+        :param step_point: Steps from bottom where a 2nd volume
+            ramp kicks in (-1 to disable).
+        :param step_fraction: Fraction of totalVolumeRange where
+            alternate volume ramp kicks in.
+        """
         self.volume = 50
+        self.total_volume_range = total_volume_range
+        self.step_point = step_point
+        self.step_fraction = step_fraction
 
     def increment(self) -> None:
         """Increment the volume."""
@@ -164,8 +171,8 @@ class SlimProtoVolume:
         # y1 = mx1+b, y2 = mx2+b.
         # y2-y1 = m(x2 - x1)
         # y2 = m(x2 - x1) + y1
-        slope_high = max_volume_db - step_db / (100.0 - self.step_point)
-        slope_low = step_db - self.total_volume_range / (self.step_point - 0.0)
+        slope_high = (max_volume_db - step_db) / (100.0 - self.step_point)
+        slope_low = (step_db - self.total_volume_range) / (self.step_point - 0.0)
         x2 = self.volume
         if x2 > self.step_point:
             m = slope_high

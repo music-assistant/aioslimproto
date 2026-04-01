@@ -36,6 +36,7 @@ from .models import (
     FORMAT_BYTE,
     PCM_SAMPLE_RATE,
     PCM_SAMPLE_SIZE,
+    SOFTWARE_PLAYER_TYPES,
     ButtonCode,
     EventType,
     MediaDetails,
@@ -467,7 +468,7 @@ class SlimClient:
 
         if mime_type is None:
             # try to get the audio format from file extension
-            for ext in (url[-3:], url.split(".")[-1]):
+            for ext in (url[-3:], url.rsplit(".", maxsplit=1)[-1]):
                 mime = f"audio/{ext}"
                 if mime in CODEC_MAPPING:
                     mime_type = mime
@@ -673,6 +674,15 @@ class SlimClient:
         self._device_type = DEVICE_TYPE.get(dev_id, "unknown device")
         self._capabilities = parse_capabilities(data)
         self.logger.debug("Player connected: %s", self.player_id)
+        # Use SqueezePlay volume params for software players (matching LMS behavior)
+        if self._device_type in SOFTWARE_PLAYER_TYPES:
+            current_volume = self.volume_control.volume
+            self.volume_control = SlimProtoVolume(
+                total_volume_range=-74,
+                step_point=25,
+                step_fraction=0.5,
+            )
+            self.volume_control.volume = current_volume
         # Set some startup settings for the player
         await self.send_frame(b"vers", b"7.9")
         # request player to send the player name
