@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import inspect
 import logging
 from types import TracebackType
 from typing import Any, Self
@@ -113,7 +114,7 @@ class SlimServer:
                 continue
             if event_filter and event.type not in event_filter:
                 continue
-            if asyncio.iscoroutinefunction(cb_func):
+            if inspect.iscoroutinefunction(cb_func):
                 asyncio.create_task(cb_func(event))  # noqa: RUF006
             else:
                 asyncio.get_running_loop().call_soon_threadsafe(cb_func, event)
