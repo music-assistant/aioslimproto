@@ -12,6 +12,7 @@ from asyncio import StreamReader, StreamWriter, create_task, timeout
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
+import inspect
 import ipaddress
 import logging
 import socket
@@ -614,7 +615,7 @@ class SlimClient:
                     handler = getattr(self, f"_process_{operation}", None)
                     if handler is None:
                         self.logger.debug("No handler for %s", operation)
-                    elif asyncio.iscoroutinefunction(handler):
+                    elif inspect.iscoroutinefunction(handler):
                         create_task(handler(packet))
                     else:
                         asyncio.get_running_loop().call_soon(handler, packet)
@@ -791,7 +792,7 @@ class SlimClient:
         event_handler = getattr(self, f"_process_stat_{event.lower()}", None)
         if event_handler is None:
             self.logger.debug("Unhandled event: %s - event_data: %s", event, event_data)
-        elif asyncio.iscoroutinefunction(event_handler):
+        elif inspect.iscoroutinefunction(event_handler):
             create_task(event_handler(data[4:]))
         else:
             asyncio.get_running_loop().call_soon(event_handler, data[4:])
