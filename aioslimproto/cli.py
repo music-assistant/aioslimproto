@@ -721,7 +721,7 @@ class SlimProtoCLI:
         player_id: str,
         start_index: int | str = 0,
         limit: int = 999,
-        *args,  # Handle but throw away any additional args
+        *args,  # Accept but discard any additional args
         **kwargs,
     ) -> PlayersResponse:
         """Handle players command."""
@@ -848,7 +848,7 @@ class SlimProtoCLI:
         player_id: str,
         start_index: int = 0,
         limit: int = 2,
-        *args,  # Handle but throw away any additional args
+        *args,  # Accept but discard any additional args
         **kwargs,
     ) -> ServerStatusResponse:
         """Handle server status command."""
