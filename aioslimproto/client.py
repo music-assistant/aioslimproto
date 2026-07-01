@@ -94,6 +94,10 @@ class SlimClient:
         self._jiffies: int = 0
         self._last_timestamp: float = 0
         self._elapsed_milliseconds: float = 0
+        # set while a new stream is requested but not yet started (STMs); used to
+        # ignore trailing STMt heartbeats of the flushed stream so elapsed_time
+        # doesn't keep reporting the previous position (e.g. right after a seek)
+        self._awaiting_stream_start: bool = False
         self._current_media: MediaDetails | None = None
         self._buffering_media: MediaDetails | None = None
         self._next_media: MediaDetails | None = None
@@ -418,6 +422,13 @@ class SlimClient:
             await self._send_strm(b"f", autostart=b"0")
             await self._send_strm(b"q", flags=0)
             self._next_media = None
+            # the flushed stream's position no longer applies; reset the elapsed
+            # baseline and ignore the flushed stream's trailing STMt heartbeats
+            # until the new stream starts (STMs), so we don't report the old
+            # position (e.g. right after a seek)
+            self._elapsed_milliseconds = 0
+            self._last_timestamp = time.time()
+            self._awaiting_stream_start = True
 
         media_details = MediaDetails(
             url=url,
@@ -885,6 +896,11 @@ class SlimClient:
         """Process incoming stat STMs message: Playback of new track has started."""
         self.logger.debug("STMs received - playback of new track has started")
         self._state = PlayerState.PLAYING
+        # a new track just started at position 0; reset the elapsed baseline and
+        # resume honouring STMt heartbeats (they now report the new stream)
+        self._elapsed_milliseconds = 0
+        self._last_timestamp = time.time()
+        self._awaiting_stream_start = False
         if self._buffering_media:
             self._current_media = self._buffering_media
             self._buffering_media = None
@@ -913,8 +929,13 @@ class SlimClient:
         ) = struct.unpack("!BBBLLLLHLLLLHLL", data[:47])
 
         self._jiffies = jiffies
-        self._elapsed_milliseconds = elapsed_milliseconds
         self._last_timestamp = time.time()
+        if self._awaiting_stream_start:
+            # trailing heartbeat of the flushed stream: keep elapsed at 0 until the
+            # new stream starts (STMs), so we don't surface the old position
+            self._elapsed_milliseconds = 0
+        else:
+            self._elapsed_milliseconds = elapsed_milliseconds
         self.callback(self, EventType.PLAYER_HEARTBEAT)
 
     async def _process_stat_stmu(self, data: bytes) -> None:
