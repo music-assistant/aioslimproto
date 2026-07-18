@@ -77,7 +77,7 @@ def dummy_player() -> SlimClient:
 
 
 @pytest.fixture
-def dummy_server() -> SlimServer:
+def dummy_server(dummy_player: SlimClient) -> SlimServer:
     """Create a dummy server for testing."""
     return cast(
         "SlimServer",
