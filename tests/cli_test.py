@@ -71,6 +71,23 @@ def dummy_player() -> SlimClient:
             next_media=None,
             elapsed_seconds=0,
             volume_level=50,
+            volume_set=AsyncMock(),
+        ),
+    )
+
+
+@pytest.fixture
+def dummy_server() -> SlimServer:
+    """Create a dummy server for testing."""
+    return cast(
+        "SlimServer",
+        SimpleNamespace(
+            name="testserver",
+            logger=logging.getLogger(),
+            players=[dummy_player],
+            get_player=lambda player_id: (
+                dummy_player if player_id == "a5:41:d2:cd:cd:05" else None
+            ),
         ),
     )
 
@@ -243,21 +260,10 @@ class TestStatusCommand:
         reason="The echoed command should have the ':' symbol URL-escaped"
     )
     async def test_echoes_without_player(
-        self, writer: Mock, dummy_player: SlimClient
+        self, writer: Mock, dummy_server: SlimServer
     ) -> None:
         """Should echo the command when no player is specified."""
-        server = cast(
-            "SlimServer",
-            SimpleNamespace(
-                logger=logging.getLogger(),
-                players=[dummy_player],
-                get_player=lambda player_id: (
-                    dummy_player if player_id == "a5:41:d2:cd:cd:05" else None
-                ),
-            ),
-        )
-
-        cli = SlimProtoCLI(server)
+        cli = SlimProtoCLI(dummy_server)
 
         response = await send_cli_command(cli, writer, "status 0 2 tags:")
         expected_response = encode_response("status", "0", "2", "tags:")
@@ -266,21 +272,9 @@ class TestStatusCommand:
 
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason="The echoed command should start with the player ID")
-    async def test_simple_example(self, writer: Mock, dummy_player: SlimClient) -> None:
+    async def test_simple_example(self, writer: Mock, dummy_server: SlimServer) -> None:
         """The "simple example" on the reference page should work."""
-        server = cast(
-            "SlimServer",
-            SimpleNamespace(
-                name="testserver",
-                logger=logging.getLogger(),
-                players=[dummy_player],
-                get_player=lambda player_id: (
-                    dummy_player if player_id == "a5:41:d2:cd:cd:05" else None
-                ),
-            ),
-        )
-
-        cli = SlimProtoCLI(server)
+        cli = SlimProtoCLI(dummy_server)
 
         response = await send_cli_command(
             cli, writer, "a5:41:d2:cd:cd:05 status 0 2 tags:"
