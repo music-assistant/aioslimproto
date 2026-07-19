@@ -72,6 +72,8 @@ def dummy_player() -> SlimClient:
             elapsed_seconds=0,
             volume_level=50,
             volume_set=AsyncMock(),
+            muted=False,
+            mute=AsyncMock(),
         ),
     )
 
@@ -258,6 +260,7 @@ class TestStatusCommand:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         reason="The echoed command should have the ':' symbol URL-escaped"
+        " and no trailing whitespace"
     )
     async def test_echoes_without_player(
         self, writer: Mock, dummy_server: SlimServer
@@ -311,4 +314,230 @@ class TestStatusCommand:
             },
         )
 
+        assert response == expected_response
+
+
+class TestMixerVolumeCommand:
+    """Tests for the mixer volume command.
+
+    Reference: https://lyrion.org/reference/cli/players/#mixer-volume
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(reason="The echoed command should not include the '?' symbol")
+    async def test_get_volume(self, writer: Mock, dummy_player: SlimClient) -> None:
+        """Should return the volume when requested with a '?'."""
+        server = cast(
+            "SlimServer",
+            SimpleNamespace(
+                logger=logging.getLogger(),
+                players=[dummy_player],
+                get_player=lambda player_id: (
+                    dummy_player if player_id == "a5:41:d2:cd:cd:05" else None
+                ),
+            ),
+        )
+
+        cli = SlimProtoCLI(server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer volume ?"
+        )
+        expected_response = encode_response(
+            "a5:41:d2:cd:cd:05", "mixer", "volume", "50"
+        )
+
+        assert response == expected_response
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded"
+    )
+    async def test_set_volume_absolute(
+        self, writer: Mock, dummy_player: SlimClient
+    ) -> None:
+        """Should set the volume to an absolute value."""
+        server = cast(
+            "SlimServer",
+            SimpleNamespace(
+                logger=logging.getLogger(),
+                players=[dummy_player],
+                get_player=lambda player_id: (
+                    dummy_player if player_id == "a5:41:d2:cd:cd:05" else None
+                ),
+            ),
+        )
+
+        cli = SlimProtoCLI(server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer volume 75"
+        )
+        expected_response = encode_response(
+            "a5:41:d2:cd:cd:05", "mixer", "volume", "75"
+        )
+
+        assert response == expected_response
+        cast("Mock", dummy_player.volume_set).assert_called_once_with(75)
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded"
+    )
+    async def test_set_volume_relative(
+        self, writer: Mock, dummy_player: SlimClient
+    ) -> None:
+        """Should change the volume by a relative value."""
+        server = cast(
+            "SlimServer",
+            SimpleNamespace(
+                logger=logging.getLogger(),
+                players=[dummy_player],
+                get_player=lambda player_id: (
+                    dummy_player if player_id == "a5:41:d2:cd:cd:05" else None
+                ),
+            ),
+        )
+
+        cli = SlimProtoCLI(server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer volume +25"
+        )
+        expected_response = encode_response(
+            "a5:41:d2:cd:cd:05", "mixer", "volume", "+25"
+        )
+
+        assert response == expected_response
+        cast("Mock", dummy_player.volume_set).assert_called_once_with(75)
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded, "
+        "fractional values are not supported"
+    )
+    async def test_set_volume_fractional(
+        self, writer: Mock, dummy_player: SlimClient
+    ) -> None:
+        """Should set the volume to a fractional value."""
+        server = cast(
+            "SlimServer",
+            SimpleNamespace(
+                logger=logging.getLogger(),
+                players=[dummy_player],
+                get_player=lambda player_id: (
+                    dummy_player if player_id == "a5:41:d2:cd:cd:05" else None
+                ),
+            ),
+        )
+
+        cli = SlimProtoCLI(server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer volume 25.5"
+        )
+        expected_response = encode_response(
+            "a5:41:d2:cd:cd:05", "mixer", "volume", "25.5"
+        )
+
+        assert response == expected_response
+        cast("Mock", dummy_player.volume_set).assert_called_once_with(25.5)
+
+
+class TestMixerMutingCommand:
+    """Tests for the mixer muting command.
+
+    Reference: https://lyrion.org/reference/cli/players/#mixer-muting
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded"
+    )
+    async def test_can_toggle_muting(
+        self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should allow toggling the muting."""
+        cli = SlimProtoCLI(dummy_server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer muting toggle"
+        )
+        expected_response = encode_response(
+            "a5:41:d2:cd:cd:05", "mixer", "muting", "toggle"
+        )
+
+        assert response == expected_response
+        cast("Mock", dummy_player.mute).assert_called_once_with(True)  # noqa: FBT003 # This is how it's called in the original code
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded, "
+        "keywordless calls are not supported"
+    )
+    async def test_can_toggle_muting_without_keyword(
+        self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should allow toggling the muting without the 'toggle' keyword."""
+        cli = SlimProtoCLI(dummy_server)
+
+        response = await send_cli_command(cli, writer, "a5:41:d2:cd:cd:05 mixer muting")
+        expected_response = encode_response("a5:41:d2:cd:cd:05", "mixer", "muting")
+
+        assert response == expected_response
+        cast("Mock", dummy_player.mute).assert_called_once_with(True)  # noqa: FBT003 # This is how it's called in the original code
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded"
+    )
+    async def test_can_mute(
+        self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should allow muting regardless of the current state."""
+        cli = SlimProtoCLI(dummy_server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer muting 1"
+        )
+        expected_response = encode_response("a5:41:d2:cd:cd:05", "mixer", "muting", "1")
+
+        assert response == expected_response
+        cast("Mock", dummy_player.mute).assert_called_once_with(True)  # noqa: FBT003 # This is how it's called in the original code
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded"
+    )
+    async def test_can_unmute(
+        self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should allow unmuting regardless of the current state."""
+        cli = SlimProtoCLI(dummy_server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer muting 0"
+        )
+        expected_response = encode_response("a5:41:d2:cd:cd:05", "mixer", "muting", "0")
+
+        assert response == expected_response
+        cast("Mock", dummy_player.mute).assert_called_once_with(False)  # noqa: FBT003 # This is how it's called in the original code
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason=(
+            "The MAC-address in the echoed command should be URL-encoded, "
+            "the question mark needs to be replaced with the actual response"
+        )
+    )
+    async def test_can_query_muting(
+        self, writer: Mock, dummy_server: SlimServer
+    ) -> None:
+        """Should return the current state of muting."""
+        cli = SlimProtoCLI(dummy_server)
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer muting ?"
+        )
+        expected_response = encode_response("a5:41:d2:cd:cd:05", "mixer", "muting", "0")
         assert response == expected_response
