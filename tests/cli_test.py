@@ -271,7 +271,10 @@ class TestStatusCommand:
         assert response == expected_response
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="The echoed command should start with the player ID")
+    @pytest.mark.xfail(
+        reason="The MAC-address in the echoed command should be URL-encoded, "
+        "upgrade flags should be integers, not Python boolean literals"
+    )
     async def test_simple_example(self, writer: Mock, dummy_server: SlimServer) -> None:
         """The "simple example" on the reference page should work."""
         cli = SlimProtoCLI(dummy_server)
@@ -280,10 +283,32 @@ class TestStatusCommand:
             cli, writer, "a5:41:d2:cd:cd:05 status 0 2 tags:"
         )
         expected_response = encode_response(
+            "a5:41:d2:cd:cd:05",
             "status",
             "0",
             "2",
-            {"player_name": "Kitchen"},
+            "tags:",
+            {
+                "player_name": "Kitchen",
+                "player_connected": 1,
+                "player_needs_upgrade": 0,
+                "player_is_upgrading": 0,
+                "power": 1,
+                "signalstrength": 0,
+                "waitingToPlay": 0,
+                "mode": "stop",
+                "remote": 1,
+                "current_title": "testserver",
+                "time": 0,
+                "duration": 0,
+                "mixer volume": 50,
+                # Not documented, but sent by the server (https://github.com/LMS-Community/slimserver/blob/public/9.2/Slim/Control/Queries.pm#L4055)
+                "player_ip": "127.0.0.1",
+                "playlist_cur_index": 0,
+                "playlist_tracks": 0,
+                "uuid": "player-uuid-1",
+                "seq_no": 1,
+            },
         )
 
         assert response == expected_response
