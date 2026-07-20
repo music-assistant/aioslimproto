@@ -208,10 +208,6 @@ class TestPlayersCommand:
         assert response == expected_response
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The pagination returns one player too many, "
-        "and the player index is incorrect"
-    )
     async def test_returns_second_player(
         self, writer: Mock, several_dummy_players: list[SlimClient]
     ) -> None:
@@ -258,10 +254,6 @@ class TestStatusCommand:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The echoed command should have the ':' symbol URL-escaped"
-        " and no trailing whitespace"
-    )
     async def test_echoes_without_player(
         self, writer: Mock, dummy_server: SlimServer
     ) -> None:
@@ -274,10 +266,7 @@ class TestStatusCommand:
         assert response == expected_response
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded, "
-        "upgrade flags should be integers, not Python boolean literals"
-    )
+    @pytest.mark.xfail(reason="Many values are hard-coded")
     async def test_simple_example(self, writer: Mock, dummy_server: SlimServer) -> None:
         """The "simple example" on the reference page should work."""
         cli = SlimProtoCLI(dummy_server)
@@ -297,7 +286,7 @@ class TestStatusCommand:
                 "player_needs_upgrade": 0,
                 "player_is_upgrading": 0,
                 "power": 1,
-                "signalstrength": 0,
+                "signalstrength": 50,
                 "waitingToPlay": 0,
                 "mode": "stop",
                 "remote": 1,
@@ -305,9 +294,9 @@ class TestStatusCommand:
                 "time": 0,
                 "duration": 0,
                 "mixer volume": 50,
-                # Not documented, but sent by the server (https://github.com/LMS-Community/slimserver/blob/public/9.2/Slim/Control/Queries.pm#L4055)
+                # Not documented, but sent by the server (https://github.com/LMS-Community/slimserver/tree/cf756254749c489a1ac859dd4aad139b513dc655/Slim/Control/Queries.pm#L4055)
                 "player_ip": "127.0.0.1",
-                "playlist_cur_index": 0,
+                "playlist_cur_index": 1,
                 "playlist_tracks": 0,
                 "uuid": "player-uuid-1",
                 "seq_no": 1,
@@ -324,7 +313,6 @@ class TestMixerVolumeCommand:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="The echoed command should not include the '?' symbol")
     async def test_get_volume(self, writer: Mock, dummy_player: SlimClient) -> None:
         """Should return the volume when requested with a '?'."""
         server = cast(
@@ -350,9 +338,6 @@ class TestMixerVolumeCommand:
         assert response == expected_response
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded"
-    )
     async def test_set_volume_absolute(
         self, writer: Mock, dummy_player: SlimClient
     ) -> None:
@@ -381,9 +366,6 @@ class TestMixerVolumeCommand:
         cast("Mock", dummy_player.volume_set).assert_called_once_with(75)
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded"
-    )
     async def test_set_volume_relative(
         self, writer: Mock, dummy_player: SlimClient
     ) -> None:
@@ -412,10 +394,7 @@ class TestMixerVolumeCommand:
         cast("Mock", dummy_player.volume_set).assert_called_once_with(75)
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded, "
-        "fractional values are not supported"
-    )
+    @pytest.mark.xfail(reason="Fractional values are not supported")
     async def test_set_volume_fractional(
         self, writer: Mock, dummy_player: SlimClient
     ) -> None:
@@ -451,9 +430,6 @@ class TestMixerMutingCommand:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded"
-    )
     async def test_can_toggle_muting(
         self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
     ) -> None:
@@ -471,10 +447,6 @@ class TestMixerMutingCommand:
         cast("Mock", dummy_player.mute).assert_called_once_with(True)  # noqa: FBT003 # This is how it's called in the original code
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded, "
-        "keywordless calls are not supported"
-    )
     async def test_can_toggle_muting_without_keyword(
         self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
     ) -> None:
@@ -488,9 +460,6 @@ class TestMixerMutingCommand:
         cast("Mock", dummy_player.mute).assert_called_once_with(True)  # noqa: FBT003 # This is how it's called in the original code
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded"
-    )
     async def test_can_mute(
         self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
     ) -> None:
@@ -506,9 +475,6 @@ class TestMixerMutingCommand:
         cast("Mock", dummy_player.mute).assert_called_once_with(True)  # noqa: FBT003 # This is how it's called in the original code
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="The MAC-address in the echoed command should be URL-encoded"
-    )
     async def test_can_unmute(
         self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
     ) -> None:
@@ -524,12 +490,6 @@ class TestMixerMutingCommand:
         cast("Mock", dummy_player.mute).assert_called_once_with(False)  # noqa: FBT003 # This is how it's called in the original code
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason=(
-            "The MAC-address in the echoed command should be URL-encoded, "
-            "the question mark needs to be replaced with the actual response"
-        )
-    )
     async def test_can_query_muting(
         self, writer: Mock, dummy_server: SlimServer
     ) -> None:
