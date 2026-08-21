@@ -11,7 +11,8 @@ from urllib.parse import quote
 import pytest
 
 from aioslimproto.cli import SlimProtoCLI
-from aioslimproto.client import PlayerState, SlimClient
+from aioslimproto.client import SlimClient
+from aioslimproto.models import PlayerState
 from aioslimproto.server import SlimServer
 
 

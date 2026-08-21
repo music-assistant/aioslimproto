@@ -267,8 +267,8 @@ class SlimProtoCLI:
                         )
                     elif cmd_result is None:
                         result_str = ""
-                    elif (placeholder_idx := raw_params.index("?")) != -1:
-                        raw_params[placeholder_idx] = str(cmd_result)
+                    elif "?" in raw_params:
+                        raw_params[raw_params.index("?")] = str(cmd_result)
                         result_str = ""
                     else:
                         result_str = str(cmd_result)
