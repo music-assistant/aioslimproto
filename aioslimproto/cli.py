@@ -225,7 +225,7 @@ class SlimProtoCLI:
         try:
             while True:
                 raw_request = await reader.readline()
-                raw_request = raw_request.strip().decode("iso-8859-1")
+                raw_request = raw_request.strip().decode("utf-8")
                 if not raw_request:
                     break
                 # request comes in as url encoded strings, separated by space
@@ -243,8 +243,6 @@ class SlimProtoCLI:
 
                 args, kwargs = parse_args(command_params)
 
-                response: str = raw_request
-
                 # check if we have a handler for this command
                 # note that we only have support for very limited commands
                 # just enough for compatibility with players but not to be used as api
@@ -258,7 +256,7 @@ class SlimProtoCLI:
                         str(args),
                         str(kwargs),
                     )
-                    cmd_result: list[str] = handler(player_id, *args, **kwargs)
+                    cmd_result = handler(player_id, *args, **kwargs)
                     if asyncio.iscoroutine(cmd_result):
                         cmd_result = await cmd_result
 
@@ -267,13 +265,20 @@ class SlimProtoCLI:
                         result_str = " ".join(
                             urllib.parse.quote(x) for x in result_parts
                         )
-                    elif not cmd_result:
+                    elif cmd_result is None:
+                        result_str = ""
+                    elif "?" in raw_params:
+                        raw_params[raw_params.index("?")] = str(cmd_result)
                         result_str = ""
                     else:
                         result_str = str(cmd_result)
-                    response += " " + result_str
-                except (AttributeError, NotImplementedError):
+
+                    response: str = " ".join(urllib.parse.quote(x) for x in raw_params)
+                    if result_str:
+                        response += " " + result_str
+                except (AttributeError, NotImplementedError) as err:
                     # no handler found, forward as event
+                    self.logger.debug("No handler found", exc_info=err)
                     if player := self.server.get_player(player_id):
                         args_str = " ".join([command] + [str(x) for x in args])
                         player.callback(player, EventType.PLAYER_CLI_EVENT, args_str)
@@ -731,9 +736,9 @@ class SlimProtoCLI:
                 start_index = 0
             if isinstance(start_index, int) and index < start_index:
                 continue
-            if len(players) > limit:
+            if len(players) >= limit:
                 break
-            players.append(create_player_item(start_index + index, player))
+            players.append(create_player_item(index, player))
         return PlayersResponse(count=len(players), players_loop=players)
 
     async def _handle_status(
@@ -759,8 +764,8 @@ class SlimProtoCLI:
         result = {
             "player_name": player.name,
             "player_connected": int(player.connected),
-            "player_needs_upgrade": False,
-            "player_is_upgrading": False,
+            "player_needs_upgrade": 0,
+            "player_is_upgrading": 0,
             "power": int(player.powered),
             "signalstrength": 0,
             "waitingToPlay": 0,
@@ -912,7 +917,7 @@ class SlimProtoCLI:
         **kwargs,
     ) -> int | None:
         """Handle player mixer command."""
-        arg = args[0] if args else "?"
+        arg = args[0] if args else None
         player = self.server.get_player(player_id)
         if not player:
             return None
@@ -922,23 +927,23 @@ class SlimProtoCLI:
             return None
         if subcommand == "volume" and arg == "?":
             return player.volume_level
-        if subcommand == "volume" and "+" in arg:
+        if subcommand == "volume" and arg is not None and "+" in arg:
             volume_level = min(100, player.volume_level + int(arg.split("+")[1]))
             await player.volume_set(volume_level)
             return None
-        if subcommand == "volume" and "-" in arg:
+        if subcommand == "volume" and arg is not None and "-" in arg:
             volume_level = max(0, player.volume_level - int(arg.split("-")[1]))
             await player.volume_set(volume_level)
             return None
 
-        # <playerid> mixer muting <0|1|toggle|?|>
+        # <playerid> mixer muting <0|1|[toggle]|?|>
         if subcommand == "muting" and isinstance(arg, int):
             await player.mute(bool(arg))
             return None
-        if subcommand == "muting" and arg == "toggle":
+        if subcommand == "muting" and (arg == "toggle" or arg is None):
             await player.mute(not player.muted)
             return None
-        if subcommand == "muting":
+        if subcommand == "muting" and arg == "?":
             return int(player.muted)
         raise NotImplementedError(f"No handler for mixer/{subcommand}")
 
