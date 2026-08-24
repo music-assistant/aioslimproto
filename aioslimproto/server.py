@@ -47,6 +47,8 @@ class SlimServer:
         - name: Name to broadcast to clients to discover this server, None =autoselect.
         - control_port: The port to start the slimproto server on, default is 3483.
           Note that only software clients can actually handle a non default control port.
+        - cli_command_handler: Optional CLI command handler, e.g., to allow browsing the library.
+          The handler can raise NotImplementedError for commands it doesn't support, then the fallback will be used.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
