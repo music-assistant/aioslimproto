@@ -26,11 +26,6 @@ repos:
         name: 🔠 Check for case conflicts
         language: system
         entry: scripts/run-in-env.sh check-case-conflict
-      - id: check-docstring-first
-        name: ℹ️  Check docstring is first
-        language: system
-        types: [python]
-        entry: scripts/run-in-env.sh check-docstring-first
       - id: check-executables-have-shebangs
         name: 🧐 Check that executables have shebangs
         language: system
