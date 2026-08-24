@@ -7,14 +7,17 @@ from collections.abc import Callable
 import inspect
 import logging
 from types import TracebackType
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
-from .cli import SlimCLICommandHandler, SlimProtoCLI
+from .cli import SlimProtoCLI
 from .client import SlimClient
 from .const import SLIMPROTO_PORT
 from .discovery import start_discovery
 from .models import EventType, SlimEvent
 from .util import get_hostname, get_ip
+
+if TYPE_CHECKING:
+    from .cli import SlimCLICommandHandler
 
 EventCallBackType = Callable[[SlimEvent], None]
 EventSubscriptionType = tuple[EventCallBackType, tuple[EventType], tuple[str]]
