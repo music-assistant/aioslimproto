@@ -374,10 +374,8 @@ class SlimProtoCLI:
             question_indexes = [
                 index for index, value in enumerate(raw_params) if value == "?"
             ]
-            if question_indexes:
-                if len(cmd_result) != len(question_indexes) or any(
-                    isinstance(value, dict) for value in cmd_result
-                ):
+            if question_indexes and len(cmd_result) == len(question_indexes):
+                if any(isinstance(value, dict) for value in cmd_result):
                     raise ValueError
                 for index, value in zip(question_indexes, cmd_result, strict=True):
                     raw_params[index] = str(value)
