@@ -7,7 +7,7 @@ from collections.abc import Callable
 import inspect
 import logging
 from types import TracebackType
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from .cli import SlimProtoCLI
 from .client import SlimClient
@@ -15,6 +15,9 @@ from .const import SLIMPROTO_PORT
 from .discovery import start_discovery
 from .models import EventType, SlimEvent
 from .util import get_hostname, get_ip
+
+if TYPE_CHECKING:
+    from .cli import SlimCLICommandHandler
 
 EventCallBackType = Callable[[SlimEvent], None]
 EventSubscriptionType = tuple[EventCallBackType, tuple[EventType], tuple[str]]
@@ -30,6 +33,7 @@ class SlimServer:
         ip_address: str | None = None,
         name: str | None = None,
         control_port: int = SLIMPROTO_PORT,
+        cli_command_handler: SlimCLICommandHandler | None = None,
     ) -> None:
         """
         Initialize SlimServer instance.
@@ -43,12 +47,16 @@ class SlimServer:
         - name: Name to broadcast to clients to discover this server, None =autoselect.
         - control_port: The port to start the slimproto server on, default is 3483.
           Note that only software clients can actually handle a non default control port.
+        - cli_command_handler: Optional CLI command handler, e.g., to allow browsing the library.
+          The handler can raise NotImplementedError for commands it doesn't support, then the fallback will be used.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
         self.name = name or get_hostname()
         self.control_port = control_port
-        self.cli = SlimProtoCLI(self, cli_port, cli_port_json)
+        self.cli = SlimProtoCLI(
+            self, cli_port, cli_port_json, command_handler=cli_command_handler
+        )
         self._subscribers: list[EventSubscriptionType] = []
         self._server: asyncio.Server | None = None
         self._discovery: asyncio.BaseTransport | None = None
