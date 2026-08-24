@@ -502,3 +502,82 @@ class TestMixerMutingCommand:
         )
         expected_response = encode_response("a5:41:d2:cd:cd:05", "mixer", "muting", "0")
         assert response == expected_response
+
+
+class TestCommandHandler:
+    """Tests for application-provided Slim command handling."""
+
+    @pytest.mark.asyncio
+    async def test_replaces_each_query_marker_with_scalar_response(
+        self, writer: Mock, dummy_server: SlimServer
+    ) -> None:
+        """Should pass parsed commands to the handler and substitute query values."""
+        handler = AsyncMock(return_value=[12, 34])
+        cli = SlimProtoCLI(dummy_server, command_handler=handler)
+
+        response = await send_cli_command(
+            cli,
+            writer,
+            "a5:41:d2:cd:cd:05 info total genres ? ? tags:summary offset:2",
+        )
+
+        assert response == encode_response(
+            "a5:41:d2:cd:cd:05",
+            "info",
+            "total",
+            "genres",
+            "12",
+            "34",
+            "tags:summary",
+            "offset:2",
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_complex_response_blocks(
+        self, writer: Mock, dummy_server: SlimServer
+    ) -> None:
+        """Should append each complex response block to the echoed query."""
+        cli = SlimProtoCLI(
+            dummy_server,
+            command_handler=AsyncMock(
+                return_value=[
+                    {"id": 1, "name": "First"},
+                    {"id": 2, "name": "Second"},
+                ]
+            ),
+        )
+
+        response = await send_cli_command(cli, writer, "library items")
+
+        assert response == encode_response(
+            "library",
+            "items",
+            {"id": 1, "name": "First"},
+            {"id": 2, "name": "Second"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_none_response_echoes_the_request(
+        self, writer: Mock, dummy_server: SlimServer
+    ) -> None:
+        """Should echo a command handled without a response payload."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+
+        response = await send_cli_command(cli, writer, "external command value")
+
+        assert response == encode_response("external", "command", "value")
+
+    @pytest.mark.asyncio
+    async def test_not_implemented_falls_back_to_builtin_handler(
+        self, writer: Mock, dummy_server: SlimServer
+    ) -> None:
+        """Should use the built-in handler when the application declines a command."""
+        cli = SlimProtoCLI(
+            dummy_server, command_handler=AsyncMock(side_effect=NotImplementedError)
+        )
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer volume ?"
+        )
+
+        assert response == encode_response("a5:41:d2:cd:cd:05", "mixer", "volume", "50")

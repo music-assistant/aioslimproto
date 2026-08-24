@@ -16,9 +16,11 @@ https://gist.github.com/samtherussell/335bf9ba75363bd167d2470b8689d9f2
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+import contextlib
 from contextlib import suppress
 from dataclasses import dataclass, field
+import inspect
 import json
 import time
 from typing import TYPE_CHECKING, Any
@@ -56,8 +58,36 @@ if TYPE_CHECKING:
 # ruff: noqa: ARG002, FBT001, FBT002, RUF006
 
 
-ArgsType = list[int | str]
-KwargsType = dict[str, Any]
+SlimCLIScalar = str | int | float
+
+ArgsType = list[SlimCLIScalar]
+"""Known as positional parameters in CLI docs."""
+KwargsType = dict[str, SlimCLIScalar]
+"""Known as tagged parameters in CLI docs."""
+
+SlimCLICommandResponse = None | list[SlimCLIScalar | dict[str, SlimCLIScalar]]
+"""
+Command handlers can return this value, and `aioslimproto` will take care of serialization.
+
+- None: command handled but no response, the CLI will echo the request back to the client.
+- list of scalars of the same length as the number of `?` in the query: the `?` will be replaced.
+- otherwise, the list is just appended to the request; dicts represent ordered blocks of output.
+"""
+
+
+@dataclass
+class SlimCLICommand:
+    """Representation of a CLI command with minimal parsing."""
+
+    player_id: str | None
+    command: str
+    args: list[SlimCLIScalar]
+    kwargs: dict[str, SlimCLIScalar]
+
+
+CommandHandler = Callable[
+    [SlimCLICommand], SlimCLICommandResponse | Awaitable[SlimCLICommandResponse]
+]
 
 
 @dataclass
@@ -76,27 +106,35 @@ class CometDClient:
     streaming: bool = False
 
 
-def parse_value(raw_value: int | str) -> int | str | tuple[str, int | str]:
+def parse_value(
+    raw_value: SlimCLIScalar,
+) -> SlimCLIScalar | tuple[str, SlimCLIScalar]:
     """
     Transform API param into a usable value.
 
-    Integer values are sometimes sent as string so we try to parse that.
+    Integer/float values are sometimes sent as string so we try to parse that.
     """
     if isinstance(raw_value, str):
+        key = None
+        value = raw_value
         if ":" in raw_value:
-            # this is a key:value value
-            key, val = raw_value.split(":", 1)
-            if val.isnumeric():
-                val = int(val)
-            return (key, val)
-        if raw_value.isnumeric():
-            # this is an integer sent as string
-            return int(raw_value)
+            # this is a key:value pair
+            key, value = raw_value.split(":", 1)
+
+        with contextlib.suppress(ValueError):
+            value = float(value)
+            if value.is_integer():
+                value = int(value)
+
+        if key is not None:
+            return (key, value)
+
+        return value
     return raw_value
 
 
-def parse_args(raw_values: list[int | str]) -> tuple[ArgsType, KwargsType]:
-    """Pargse Args and Kwargs from raw CLI params."""
+def parse_args(raw_values: list[SlimCLIScalar]) -> tuple[ArgsType, KwargsType]:
+    """Parse positional and tagged parameters from raw CLI tokens."""
     args: ArgsType = []
     kwargs: KwargsType = {}
     for raw_value in raw_values:
@@ -114,12 +152,14 @@ class SlimProtoCLI:
     _unsub_callback: Callable | None = None
     _periodic_task: asyncio.Task | None = None
     _cli_server: asyncio.Server | None = None
+    command_handler: CommandHandler | None = None
 
     def __init__(
         self,
         server: SlimServer,
         cli_port: int | None = None,
         cli_port_json: int | None = 0,
+        command_handler: CommandHandler | None = None,
     ) -> None:
         """
         Initialize Telnet and/or Json interface CLI.
@@ -130,6 +170,7 @@ class SlimProtoCLI:
         self.cli_port = cli_port
         self.cli_port_json = cli_port_json
         self.logger = server.logger.getChild("cli")
+        self.command_handler = command_handler
         self._cometd_clients: dict[str, CometDClient] = {}
         self._player_map: dict[str, str] = {}
         self._apprunner: web.AppRunner | None = None
@@ -242,55 +283,27 @@ class SlimProtoCLI:
                     command_params = raw_params[1:]
 
                 args, kwargs = parse_args(command_params)
-
-                # check if we have a handler for this command
-                # note that we only have support for very limited commands
-                # just enough for compatibility with players but not to be used as api
-                # with 3rd party tools!
+                slim_command = SlimCLICommand(
+                    player_id=player_id or None,
+                    command=command,
+                    args=args,
+                    kwargs=kwargs,
+                )
+                self.logger.debug(
+                    "Handling CLI-request (player: %s command: %s - args: %s - kwargs: %s)",
+                    player_id,
+                    command,
+                    str(args),
+                    str(kwargs),
+                )
                 try:
-                    handler = getattr(self, f"_handle_{command}")
-                    self.logger.debug(
-                        "Handling CLI-request (player: %s command: %s - args: %s - kwargs: %s)",
-                        player_id,
-                        command,
-                        str(args),
-                        str(kwargs),
-                    )
-                    cmd_result = handler(player_id, *args, **kwargs)
-                    if asyncio.iscoroutine(cmd_result):
-                        cmd_result = await cmd_result
-
-                    if isinstance(cmd_result, dict):
-                        result_parts = dict_to_strings(cmd_result)
-                        result_str = " ".join(
-                            urllib.parse.quote(x) for x in result_parts
-                        )
-                    elif cmd_result is None:
-                        result_str = ""
-                    elif "?" in raw_params:
-                        raw_params[raw_params.index("?")] = str(cmd_result)
-                        result_str = ""
-                    else:
-                        result_str = str(cmd_result)
-
-                    response: str = " ".join(urllib.parse.quote(x) for x in raw_params)
-                    if result_str:
-                        response += " " + result_str
-                except (AttributeError, NotImplementedError) as err:
-                    # no handler found, forward as event
+                    cmd_result = await self._dispatch_command(slim_command)
+                    response = self._format_cli_response(raw_params, cmd_result)
+                except NotImplementedError as err:
+                    # No handler found, forward as event and echo the request.
                     self.logger.debug("No handler found", exc_info=err)
-                    if player := self.server.get_player(player_id):
-                        args_str = " ".join([command] + [str(x) for x in args])
-                        player.callback(player, EventType.PLAYER_CLI_EVENT, args_str)
-                    else:
-                        self.logger.warning(
-                            "No handler for %s (player: %s - args: %s - kwargs: %s)",
-                            command,
-                            player_id,
-                            str(args),
-                            str(kwargs),
-                        )
-                # echo back the request and the result (if any)
+                    self._publish_unhandled_command(slim_command)
+                    response = " ".join(urllib.parse.quote(x) for x in raw_params)
                 response += "\n"
                 writer.write(response.encode("iso-8859-1"))
                 await writer.drain()
@@ -305,6 +318,90 @@ class SlimProtoCLI:
                 writer.close()
                 with suppress(Exception):
                     await writer.wait_closed()
+
+    async def _dispatch_command(self, slim_command: SlimCLICommand) -> Any:
+        """Dispatch a command to the application handler, then the built-in fallback."""
+        if self.command_handler is not None:
+            try:
+                result = self.command_handler(slim_command)
+                if inspect.isawaitable(result):
+                    result = await result
+            except NotImplementedError:
+                pass
+            else:
+                return result
+
+        handler = getattr(self, f"_handle_{slim_command.command}", None)
+        if handler is None:
+            raise NotImplementedError(f"No handler for command: {slim_command.command}")
+        result = handler(
+            slim_command.player_id or "",
+            *slim_command.args,
+            **slim_command.kwargs,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def _publish_unhandled_command(self, slim_command: SlimCLICommand) -> None:
+        """Publish an unhandled command to the addressed player, when available."""
+        if player := self.server.get_player(slim_command.player_id or ""):
+            args_str = " ".join(
+                [slim_command.command] + [str(arg) for arg in slim_command.args]
+            )
+            player.callback(player, EventType.PLAYER_CLI_EVENT, args_str)
+        else:
+            self.logger.warning(
+                "No handler for %s (player: %s - args: %s - kwargs: %s)",
+                slim_command.command,
+                slim_command.player_id,
+                str(slim_command.args),
+                str(slim_command.kwargs),
+            )
+
+    def _format_cli_response(self, raw_params: list[str], cmd_result: Any) -> str:
+        """Format a command result for the legacy CLI transport."""
+        if cmd_result is None:
+            return " ".join(urllib.parse.quote(param) for param in raw_params)
+
+        if isinstance(cmd_result, list):
+            question_indexes = [
+                index for index, value in enumerate(raw_params) if value == "?"
+            ]
+            if question_indexes:
+                if len(cmd_result) != len(question_indexes) or any(
+                    isinstance(value, dict) for value in cmd_result
+                ):
+                    raise ValueError
+                for index, value in zip(question_indexes, cmd_result, strict=True):
+                    raw_params[index] = str(value)
+                return " ".join(urllib.parse.quote(param) for param in raw_params)
+
+            result_parts: list[str] = []
+            for value in cmd_result:
+                if isinstance(value, dict):
+                    result_parts.extend(dict_to_strings(value))
+                else:
+                    result_parts.append(str(value))
+            response = " ".join(urllib.parse.quote(param) for param in raw_params)
+            if result_parts:
+                response += " " + " ".join(
+                    urllib.parse.quote(value) for value in result_parts
+                )
+            return response
+
+        # For backwards compatibility, to be removed whenever possible.
+        if isinstance(cmd_result, dict):
+            result_parts = dict_to_strings(cmd_result)
+            response = " ".join(urllib.parse.quote(param) for param in raw_params)
+            if result_parts:
+                response += " " + " ".join(
+                    urllib.parse.quote(value) for value in result_parts
+                )
+            return response
+        return " ".join(
+            urllib.parse.quote(param) for param in [*raw_params, str(cmd_result)]
+        )
 
     async def _handle_jsonrpc_client(self, request: web.Request) -> web.Response:
         """Handle request on JSON-RPC endpoint."""
@@ -684,42 +781,39 @@ class SlimProtoCLI:
 
         asyncio.create_task(_handle())
 
-    async def _handle_command(self, params: tuple[str, list[str | int]]) -> Any:
-        """Handle command for either JSON or CometD request."""
+    async def _handle_command(self, params: tuple[str, list[SlimCLIScalar]]) -> Any:
+        """Handle a JSON-RPC or CometD command."""
         # Slim request handler
         # {"method":"slim.request","id":1,"params":["aa:aa:ca:5a:94:4c",["status","-", 2, "tags:xcfldatgrKN"]]}
-        self.logger.debug(
-            "Handling request: %s",
-            str(params),
-        )
+        self.logger.debug("Handling request: %s", str(params))
         player_id = params[0]
         command = str(params[1][0])
         args, kwargs = parse_args(params[1][1:])
+        slim_command = SlimCLICommand(
+            player_id=player_id or None,
+            command=command,
+            args=args,
+            kwargs=kwargs,
+        )
         if (
             player_id
             and "seq_no" in kwargs
             and (player := self.server.get_player(player_id))
         ):
             player.extra_data["seq_no"] = int(kwargs["seq_no"])
-        if handler := getattr(self, f"_handle_{command}", None):
-            # run handler for command
-            with suppress(NotImplementedError):
-                cmd_result = handler(player_id, *args, **kwargs)
-                if asyncio.iscoroutine(cmd_result):
-                    cmd_result = await cmd_result
-                if cmd_result is None:
-                    cmd_result = {}
-                elif not isinstance(cmd_result, dict):
-                    # individual values are returned with underscore ?!
-                    cmd_result = {f"_{command}": cmd_result}
-                return cmd_result
-        # no handler found, forward as event
-        if player := self.server.get_player(player_id):
-            args_str = " ".join([command] + [str(x) for x in args])
-            player.callback(player, EventType.PLAYER_CLI_EVENT, args_str)
-        else:
-            self.logger.warning("No handler for %s", command)
-        return None
+        try:
+            cmd_result = await self._dispatch_command(slim_command)
+        except NotImplementedError:
+            self._publish_unhandled_command(slim_command)
+            return None
+
+        if cmd_result is None:
+            return {}
+        if isinstance(cmd_result, (dict, list)):
+            return cmd_result
+        # Preserve the behaviour of legacy built-in handlers during the transition.
+        # individual values are returned with underscore ?!
+        return {f"_{command}": cmd_result}
 
     def _handle_players(
         self,

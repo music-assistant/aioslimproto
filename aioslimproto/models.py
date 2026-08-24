@@ -264,7 +264,7 @@ class CommandMessage(TypedDict):
 
     id: int | str
     method: str
-    params: tuple[str, list[str | int]]
+    params: tuple[str, list[str | int | float]]
 
 
 class CommandResultMessage(CommandMessage):
