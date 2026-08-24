@@ -394,8 +394,21 @@ class TestMixerVolumeCommand:
         assert response == expected_response
         cast("Mock", dummy_player.volume_set).assert_called_once_with(75)
 
+        cast("Mock", dummy_player.volume_set).reset_mock()
+        writer.reset_mock()
+
+        response = await send_cli_command(
+            cli, writer, "a5:41:d2:cd:cd:05 mixer volume -50"
+        )
+        expected_response = encode_response(
+            "a5:41:d2:cd:cd:05", "mixer", "volume", "-50"
+        )
+
+        assert response == expected_response
+        cast("Mock", dummy_player.volume_set).assert_called_once_with(0)
+
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="Fractional values are not supported")
+    @pytest.mark.xfail(reason="Fractional volume is not yet implemented")
     async def test_set_volume_fractional(
         self, writer: Mock, dummy_player: SlimClient
     ) -> None:

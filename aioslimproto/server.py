@@ -9,7 +9,7 @@ import logging
 from types import TracebackType
 from typing import Any, Self
 
-from .cli import SlimProtoCLI
+from .cli import SlimCLICommandHandler, SlimProtoCLI
 from .client import SlimClient
 from .const import SLIMPROTO_PORT
 from .discovery import start_discovery
@@ -30,6 +30,7 @@ class SlimServer:
         ip_address: str | None = None,
         name: str | None = None,
         control_port: int = SLIMPROTO_PORT,
+        cli_command_handler: SlimCLICommandHandler | None = None,
     ) -> None:
         """
         Initialize SlimServer instance.
@@ -48,7 +49,9 @@ class SlimServer:
         self.ip_address = ip_address or get_ip()
         self.name = name or get_hostname()
         self.control_port = control_port
-        self.cli = SlimProtoCLI(self, cli_port, cli_port_json)
+        self.cli = SlimProtoCLI(
+            self, cli_port, cli_port_json, command_handler=cli_command_handler
+        )
         self._subscribers: list[EventSubscriptionType] = []
         self._server: asyncio.Server | None = None
         self._discovery: asyncio.BaseTransport | None = None

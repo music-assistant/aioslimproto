@@ -57,7 +57,6 @@ if TYPE_CHECKING:
 
 # ruff: noqa: ARG002, FBT001, FBT002, RUF006
 
-
 SlimCLIScalar = str | int | float
 
 ArgsType = list[SlimCLIScalar]
@@ -65,7 +64,9 @@ ArgsType = list[SlimCLIScalar]
 KwargsType = dict[str, SlimCLIScalar]
 """Known as tagged parameters in CLI docs."""
 
-SlimCLICommandResponse = None | list[SlimCLIScalar | dict[str, SlimCLIScalar]]
+SlimCLICommandResponse = (
+    None | SlimCLIScalar | list[SlimCLIScalar | dict[str, SlimCLIScalar]]
+)
 """
 Command handlers can return this value, and `aioslimproto` will take care of serialization.
 
@@ -85,7 +86,7 @@ class SlimCLICommand:
     kwargs: dict[str, SlimCLIScalar]
 
 
-CommandHandler = Callable[
+SlimCLICommandHandler = Callable[
     [SlimCLICommand], SlimCLICommandResponse | Awaitable[SlimCLICommandResponse]
 ]
 
@@ -122,9 +123,11 @@ def parse_value(
             key, value = raw_value.split(":", 1)
 
         with contextlib.suppress(ValueError):
-            value = float(value)
-            if value.is_integer():
-                value = int(value)
+            # number that starts with a + indicates a relative value
+            if not value.startswith("+"):
+                value = float(value)
+                if value.is_integer():
+                    value = int(value)
 
         if key is not None:
             return (key, value)
@@ -152,14 +155,14 @@ class SlimProtoCLI:
     _unsub_callback: Callable | None = None
     _periodic_task: asyncio.Task | None = None
     _cli_server: asyncio.Server | None = None
-    command_handler: CommandHandler | None = None
+    command_handler: SlimCLICommandHandler | None = None
 
     def __init__(
         self,
         server: SlimServer,
         cli_port: int | None = None,
         cli_port_json: int | None = 0,
-        command_handler: CommandHandler | None = None,
+        command_handler: SlimCLICommandHandler | None = None,
     ) -> None:
         """
         Initialize Telnet and/or Json interface CLI.
@@ -360,9 +363,12 @@ class SlimProtoCLI:
             )
 
     def _format_cli_response(self, raw_params: list[str], cmd_result: Any) -> str:
-        """Format a command result for the legacy CLI transport."""
+        """Format a command result for the Telnet CLI transport."""
         if cmd_result is None:
             return " ".join(urllib.parse.quote(param) for param in raw_params)
+
+        if isinstance(cmd_result, (int, str, float)):
+            cmd_result = [cmd_result]
 
         if isinstance(cmd_result, list):
             question_indexes = [
@@ -1016,17 +1022,17 @@ class SlimProtoCLI:
         if not player:
             return None
         # <playerid> mixer volume <0 .. 100|-100 .. +100|?>
-        if subcommand == "volume" and isinstance(arg, int):
+        if subcommand == "volume" and isinstance(arg, int) and arg >= 0:
             await player.volume_set(arg)
             return None
         if subcommand == "volume" and arg == "?":
             return player.volume_level
-        if subcommand == "volume" and arg is not None and "+" in arg:
+        if subcommand == "volume" and isinstance(arg, str) and "+" in arg:
             volume_level = min(100, player.volume_level + int(arg.split("+")[1]))
             await player.volume_set(volume_level)
             return None
-        if subcommand == "volume" and arg is not None and "-" in arg:
-            volume_level = max(0, player.volume_level - int(arg.split("-")[1]))
+        if subcommand == "volume" and isinstance(arg, int) and arg < 0:
+            volume_level = max(0, player.volume_level + arg)
             await player.volume_set(volume_level)
             return None
 
