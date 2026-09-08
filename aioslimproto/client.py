@@ -930,8 +930,8 @@ class SlimClient:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
         self.logger.debug("STMu received - end of playback.")
         if self._next_media:
-            # decoder outran the output buffer: STMu raced ahead of the STMd
-            # that would normally promote the enqueued track, so do it here
+            # the server can enqueue after STMd has already passed, making this the
+            # last chance to start the track it handed us
             await self._promote_next_media()
             return
         self._state = PlayerState.STOPPED
@@ -958,6 +958,7 @@ class SlimClient:
 
     async def _promote_next_media(self) -> None:
         """Start playback of the enqueued next media, if any."""
+        # STMd and STMu can arrive in one batch, so only the first caller promotes
         if not self._next_media:
             return
         enqueued_media = self._next_media
