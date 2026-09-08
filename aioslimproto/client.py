@@ -856,8 +856,10 @@ class SlimClient:
             asyncio.create_task(self._promote_next_media())
             return
         # nothing enqueued yet: remember readiness so a track enqueued later
-        # starts immediately instead of waiting for STMu
-        self._decoder_ready = True
+        # starts immediately instead of waiting for STMu. Not when stopped:
+        # a late STMd must not undo a deliberate stop by re-arming readiness.
+        if self._state != PlayerState.STOPPED:
+            self._decoder_ready = True
         self.callback(self, EventType.PLAYER_DECODER_READY)
 
     def _process_stat_stmf(self, data: bytes) -> None:

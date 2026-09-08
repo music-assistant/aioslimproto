@@ -92,6 +92,7 @@ class TestDecoderReadyPromotesAtEnqueueTime:
         self, live_client: SlimClient
     ) -> None:
         """A track enqueued after STMd should start right away (gapless handoff)."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
         live_client._process_stat_stmd(b"")  # noqa: SLF001
 
         await live_client.play_url(
@@ -121,8 +122,29 @@ class TestDecoderReadyPromotesAtEnqueueTime:
     @pytest.mark.asyncio
     async def test_stop_clears_decoder_readiness(self, live_client: SlimClient) -> None:
         """An enqueue after stop() must be stored, not started from a stale STMd."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
         live_client._process_stat_stmd(b"")  # noqa: SLF001
         await live_client.stop()
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await live_client.play_url(
+            url="http://127.0.0.1:8080/next.mp3",
+            enqueue=True,
+            send_flush=False,
+        )
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        assert live_client.next_media is not None
+
+    @pytest.mark.asyncio
+    async def test_late_stmd_after_stop_does_not_rearm(
+        self, live_client: SlimClient
+    ) -> None:
+        """An STMd arriving after stop() must not let an enqueue restart playback."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        await live_client.stop()
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+        live_client._process_stat_stmd(b"")  # noqa: SLF001
 
         await live_client.play_url(
             url="http://127.0.0.1:8080/next.mp3",
