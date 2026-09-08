@@ -101,6 +101,9 @@ class SlimClient:
         self._current_media: MediaDetails | None = None
         self._buffering_media: MediaDetails | None = None
         self._next_media: MediaDetails | None = None
+        # set when STMd arrives with nothing enqueued; a track enqueued afterwards
+        # can then start immediately (gapless) instead of waiting for STMu
+        self._decoder_ready: bool = False
         self._connected: bool = False
         self._last_heartbeat = 0
         self._auto_play: bool = False
@@ -279,6 +282,7 @@ class SlimClient:
         """Send stop command to player."""
         # invalidate any pre-enqueued track so a late STMu can't resume playback
         self._next_media = None
+        self._decoder_ready = False
         if self._state == PlayerState.STOPPED:
             return
         await self._send_strm(b"q", flags=0)
@@ -388,7 +392,7 @@ class SlimClient:
             send_flush=True,
         )
 
-    async def play_url(
+    async def play_url(  # noqa: PLR0915
         self,
         url: str,
         mime_type: str | None = None,
@@ -440,10 +444,16 @@ class SlimClient:
             transition_duration=transition_duration,
         )
         if enqueue:
-            self._next_media = media_details
-            self.extra_data["playlist_timestamp"] = int(time.time())
-            self.signal_update()
-            return
+            if not self._decoder_ready:
+                self._next_media = media_details
+                self.extra_data["playlist_timestamp"] = int(time.time())
+                self.signal_update()
+                return
+            # the decoder already reported ready (STMd) before this enqueue arrived;
+            # start the track now to keep the handoff gapless instead of waiting
+            # for STMu (end of playback), which would leave an audible gap
+            self.logger.debug("decoder already ready - starting enqueued url now")
+        self._decoder_ready = False
         self._buffering_media = media_details
         self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
@@ -845,6 +855,9 @@ class SlimClient:
         if self._next_media:
             asyncio.create_task(self._promote_next_media())
             return
+        # nothing enqueued yet: remember readiness so a track enqueued later
+        # starts immediately instead of waiting for STMu
+        self._decoder_ready = True
         self.callback(self, EventType.PLAYER_DECODER_READY)
 
     def _process_stat_stmf(self, data: bytes) -> None:
@@ -930,8 +943,8 @@ class SlimClient:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
         self.logger.debug("STMu received - end of playback.")
         if self._next_media:
-            # the server can enqueue after STMd has already passed, making this the
-            # last chance to start the track it handed us
+            # fallback for a track that was neither promoted by STMd nor started
+            # at enqueue time; this is the last chance to start it
             await self._promote_next_media()
             return
         self._state = PlayerState.STOPPED
