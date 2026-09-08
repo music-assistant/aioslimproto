@@ -277,6 +277,8 @@ class SlimClient:
 
     async def stop(self) -> None:
         """Send stop command to player."""
+        # invalidate any pre-enqueued track so a late STMu can't resume playback
+        self._next_media = None
         if self._state == PlayerState.STOPPED:
             return
         await self._send_strm(b"q", flags=0)
@@ -841,21 +843,7 @@ class SlimClient:
         """Process incoming stat STMd message (decoder ready)."""
         self.logger.debug("STMd received - decoder ready.")
         if self._next_media:
-            # a next url has been enqueued
-            enqueued_media = self._next_media
-            self._next_media = None
-            asyncio.create_task(
-                self.play_url(
-                    url=enqueued_media.url,
-                    mime_type=enqueued_media.mime_type,
-                    metadata=enqueued_media.metadata,
-                    transition=enqueued_media.transition,
-                    transition_duration=enqueued_media.transition_duration,
-                    enqueue=False,
-                    autostart=True,
-                    send_flush=False,
-                ),
-            )
+            asyncio.create_task(self._promote_next_media())
             return
         self.callback(self, EventType.PLAYER_DECODER_READY)
 
@@ -941,6 +929,11 @@ class SlimClient:
     async def _process_stat_stmu(self, data: bytes) -> None:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
         self.logger.debug("STMu received - end of playback.")
+        if self._next_media:
+            # decoder outran the output buffer: STMu raced ahead of the STMd
+            # that would normally promote the enqueued track, so do it here
+            await self._promote_next_media()
+            return
         self._state = PlayerState.STOPPED
         # invalidate url/metadata
         self._current_media = None
@@ -962,6 +955,23 @@ class SlimClient:
         """Process incoming stat STMn message: player couldn't decode stream."""
         self.logger.debug("STMn received - player couldn't decode stream.")
         self.callback(self, EventType.PLAYER_DECODER_ERROR)
+
+    async def _promote_next_media(self) -> None:
+        """Start playback of the enqueued next media, if any."""
+        if not self._next_media:
+            return
+        enqueued_media = self._next_media
+        self._next_media = None
+        await self.play_url(
+            url=enqueued_media.url,
+            mime_type=enqueued_media.mime_type,
+            metadata=enqueued_media.metadata,
+            transition=enqueued_media.transition,
+            transition_duration=enqueued_media.transition_duration,
+            enqueue=False,
+            autostart=True,
+            send_flush=False,
+        )
 
     async def _process_resp(self, data: bytes) -> None:
         """Process incoming RESP message: Response received at player."""
