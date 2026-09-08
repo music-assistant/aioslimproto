@@ -101,6 +101,9 @@ class SlimClient:
         self._current_media: MediaDetails | None = None
         self._buffering_media: MediaDetails | None = None
         self._next_media: MediaDetails | None = None
+        # set when STMd arrives with nothing enqueued; a track enqueued afterwards
+        # can then start immediately (gapless) instead of waiting for STMu
+        self._decoder_ready: bool = False
         self._connected: bool = False
         self._last_heartbeat = 0
         self._auto_play: bool = False
@@ -277,6 +280,9 @@ class SlimClient:
 
     async def stop(self) -> None:
         """Send stop command to player."""
+        # invalidate any pre-enqueued track so a late STMu can't resume playback
+        self._next_media = None
+        self._decoder_ready = False
         if self._state == PlayerState.STOPPED:
             return
         await self._send_strm(b"q", flags=0)
@@ -386,7 +392,7 @@ class SlimClient:
             send_flush=True,
         )
 
-    async def play_url(
+    async def play_url(  # noqa: PLR0915
         self,
         url: str,
         mime_type: str | None = None,
@@ -438,10 +444,16 @@ class SlimClient:
             transition_duration=transition_duration,
         )
         if enqueue:
-            self._next_media = media_details
-            self.extra_data["playlist_timestamp"] = int(time.time())
-            self.signal_update()
-            return
+            if not self._decoder_ready:
+                self._next_media = media_details
+                self.extra_data["playlist_timestamp"] = int(time.time())
+                self.signal_update()
+                return
+            # the decoder already reported ready (STMd) before this enqueue arrived;
+            # start the track now to keep the handoff gapless instead of waiting
+            # for STMu (end of playback), which would leave an audible gap
+            self.logger.debug("decoder already ready - starting enqueued url now")
+        self._decoder_ready = False
         self._buffering_media = media_details
         self.extra_data["playlist_timestamp"] = int(time.time())
         self.signal_update()
@@ -841,22 +853,13 @@ class SlimClient:
         """Process incoming stat STMd message (decoder ready)."""
         self.logger.debug("STMd received - decoder ready.")
         if self._next_media:
-            # a next url has been enqueued
-            enqueued_media = self._next_media
-            self._next_media = None
-            asyncio.create_task(
-                self.play_url(
-                    url=enqueued_media.url,
-                    mime_type=enqueued_media.mime_type,
-                    metadata=enqueued_media.metadata,
-                    transition=enqueued_media.transition,
-                    transition_duration=enqueued_media.transition_duration,
-                    enqueue=False,
-                    autostart=True,
-                    send_flush=False,
-                ),
-            )
+            asyncio.create_task(self._promote_next_media())
             return
+        # nothing enqueued yet: remember readiness so a track enqueued later
+        # starts immediately instead of waiting for STMu. Not when stopped:
+        # a late STMd must not undo a deliberate stop by re-arming readiness.
+        if self._state != PlayerState.STOPPED:
+            self._decoder_ready = True
         self.callback(self, EventType.PLAYER_DECODER_READY)
 
     def _process_stat_stmf(self, data: bytes) -> None:
@@ -941,6 +944,11 @@ class SlimClient:
     async def _process_stat_stmu(self, data: bytes) -> None:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
         self.logger.debug("STMu received - end of playback.")
+        if self._next_media:
+            # fallback for a track that was neither promoted by STMd nor started
+            # at enqueue time; this is the last chance to start it
+            await self._promote_next_media()
+            return
         self._state = PlayerState.STOPPED
         # invalidate url/metadata
         self._current_media = None
@@ -962,6 +970,24 @@ class SlimClient:
         """Process incoming stat STMn message: player couldn't decode stream."""
         self.logger.debug("STMn received - player couldn't decode stream.")
         self.callback(self, EventType.PLAYER_DECODER_ERROR)
+
+    async def _promote_next_media(self) -> None:
+        """Start playback of the enqueued next media, if any."""
+        # STMd and STMu can arrive in one batch, so only the first caller promotes
+        if not self._next_media:
+            return
+        enqueued_media = self._next_media
+        self._next_media = None
+        await self.play_url(
+            url=enqueued_media.url,
+            mime_type=enqueued_media.mime_type,
+            metadata=enqueued_media.metadata,
+            transition=enqueued_media.transition,
+            transition_duration=enqueued_media.transition_duration,
+            enqueue=False,
+            autostart=True,
+            send_flush=False,
+        )
 
     async def _process_resp(self, data: bytes) -> None:
         """Process incoming RESP message: Response received at player."""
