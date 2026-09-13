@@ -81,6 +81,8 @@ class TestPromoteNextMediaOnStmu:
             enqueue=False,
             autostart=True,
             send_flush=False,
+            stream_threshold=media.stream_threshold,
+            output_threshold=media.output_threshold,
         )
         assert client.next_media is None
 
@@ -184,6 +186,45 @@ class TestStopInvalidatesEnqueuedMedia:
 
         client.play_url.assert_not_called()
         assert client.state == PlayerState.STOPPED
+
+
+class TestStreamThresholds:
+    """The buffer thresholds given to play_url reach the player's strm-s."""
+
+    @pytest.mark.asyncio
+    async def test_play_url_uses_default_thresholds(
+        self, live_client: SlimClient
+    ) -> None:
+        """Without thresholds, the player buffers 200 KB and 2 seconds."""
+        await live_client.play_url(
+            url="http://127.0.0.1:8080/track.wav",
+            mime_type="audio/wav",
+        )
+
+        strm = live_client._send_strm.call_args.kwargs  # noqa: SLF001
+        assert (strm["threshold"], strm["output_threshold"]) == (200, 20)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("start", ["direct", "stmu", "next"])
+    async def test_custom_thresholds_reach_the_player(
+        self, live_client: SlimClient, *, start: str
+    ) -> None:
+        """Custom thresholds apply however the url gets started, enqueued or not."""
+        await live_client.play_url(
+            url="http://127.0.0.1:8080/radio.flac",
+            enqueue=start != "direct",
+            send_flush=False,
+            stream_threshold=64,
+            output_threshold=1,
+        )
+        if start == "stmu":
+            await live_client._process_stat_stmu(b"")  # noqa: SLF001
+        elif start == "next":
+            await live_client.next()
+
+        strm = live_client._send_strm.call_args.kwargs  # noqa: SLF001
+        assert strm["command"] == b"s"
+        assert (strm["threshold"], strm["output_threshold"]) == (64, 1)
 
 
 class TestStreamBodyWaitsForCont:

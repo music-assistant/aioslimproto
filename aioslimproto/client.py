@@ -395,6 +395,8 @@ class SlimClient:
             enqueue=False,
             autostart=True,
             send_flush=True,
+            stream_threshold=self._next_media.stream_threshold,
+            output_threshold=self._next_media.output_threshold,
         )
 
     async def play_url(  # noqa: PLR0915
@@ -407,6 +409,8 @@ class SlimClient:
         enqueue: bool = False,
         autostart: bool = True,
         send_flush: bool = True,
+        stream_threshold: int = 200,
+        output_threshold: int = 20,
     ) -> None:
         """
         Request player to start playing a single url.
@@ -422,6 +426,10 @@ class SlimClient:
         - autostart: advanced option to not auto start playback,
           but wait for the buffer to be full.
         - send_flush: advanced option to flush the buffer before playback.
+        - stream_threshold: advanced option to set how much stream data (in KB, 0-255)
+          the player buffers before it autostarts or reports the buffer ready.
+        - output_threshold: advanced option to set how much decoded audio
+          (in tenths of a second, 0-255) the player buffers before playback starts.
         """
         self.logger.debug("play url (enqueue: %s): %s", enqueue, url)
 
@@ -447,6 +455,8 @@ class SlimClient:
             metadata=metadata or {},
             transition=transition,
             transition_duration=transition_duration,
+            stream_threshold=stream_threshold,
+            output_threshold=output_threshold,
         )
         if enqueue:
             if not self._decoder_ready:
@@ -526,8 +536,8 @@ class SlimClient:
             autostart=b"3" if autostart else b"2",
             server_port=port,
             server_ip=int(ipaddress.ip_address(ipaddr)),
-            threshold=200,
-            output_threshold=20,
+            threshold=stream_threshold,
+            output_threshold=output_threshold,
             trans_duration=transition_duration,
             trans_type=transition.value,
             flags=0x20 if scheme == "https" else 0x00,
@@ -999,6 +1009,8 @@ class SlimClient:
             enqueue=False,
             autostart=True,
             send_flush=False,
+            stream_threshold=enqueued_media.stream_threshold,
+            output_threshold=enqueued_media.output_threshold,
         )
 
     async def _process_resp(self, data: bytes) -> None:
