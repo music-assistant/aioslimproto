@@ -421,10 +421,10 @@ class SlimClient:
         - autostart: advanced option to not auto start playback,
           but wait for the buffer to be full.
         - send_flush: advanced option to flush the buffer before playback.
-        - stream_threshold: advanced option to set how much stream data (in KB)
+        - stream_threshold: advanced option to set how much stream data (in KB, 0-255)
           the player buffers before it autostarts or reports the buffer ready.
         - output_threshold: advanced option to set how much decoded audio
-          (in tenths of a second) the player buffers before playback starts.
+          (in tenths of a second, 0-255) the player buffers before playback starts.
         """
         self.logger.debug("play url (enqueue: %s): %s", enqueue, url)
 
