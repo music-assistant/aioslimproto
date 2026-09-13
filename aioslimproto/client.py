@@ -98,6 +98,11 @@ class SlimClient:
         # ignore trailing STMt heartbeats of the flushed stream so elapsed_time
         # doesn't keep reporting the previous position (e.g. right after a seek)
         self._awaiting_stream_start: bool = False
+        # set while a new stream (strm-s) awaits its STMc; the player sends the new
+        # stream's RESP only after that STMc, so a RESP before it is stale
+        self._awaiting_stmc: bool = False
+        # the stale RESP guard only applies to players known to send STMc
+        self._stmc_seen: bool = False
         self._current_media: MediaDetails | None = None
         self._buffering_media: MediaDetails | None = None
         self._next_media: MediaDetails | None = None
@@ -512,6 +517,7 @@ class SlimClient:
             b"\r\n" % (path.encode(), host.encode())
         )
         self._auto_play = autostart
+        self._awaiting_stmc = self._stmc_seen
         await self._send_strm(
             command=b"s",
             codec_details=codec_details,
@@ -817,7 +823,7 @@ class SlimClient:
         # from the data stream either because the stream ended, or because
         # they have finished buffering the current file
 
-    def _process_stat(self, data: bytes) -> None:
+    async def _process_stat(self, data: bytes) -> None:
         """Redirect incoming STAT event from player to correct method."""
         event = data[:4].decode()
         event_data = data[4:]
@@ -825,12 +831,14 @@ class SlimClient:
             # Presumed informational stat message
             return
         event_handler = getattr(self, f"_process_stat_{event.lower()}", None)
+        # run the handler here instead of scheduling it, so the event is handled
+        # before any packet that followed it (e.g. the RESP after an STMc)
         if event_handler is None:
             self.logger.debug("Unhandled event: %s - event_data: %s", event, event_data)
         elif inspect.iscoroutinefunction(event_handler):
-            create_task(event_handler(data[4:]))
+            await event_handler(data[4:])
         else:
-            asyncio.get_running_loop().call_soon(event_handler, data[4:])
+            event_handler(data[4:])
 
     async def _process_stat_aude(self, data: bytes) -> None:
         """Process incoming stat AUDe message (power level and mute)."""
@@ -848,6 +856,8 @@ class SlimClient:
         """Process incoming stat STMc message (connected)."""
         self.logger.debug("STMc received - connected.")
         # srtm-s command received. Guaranteed to be the first response to an strm-s.
+        self._stmc_seen = True
+        self._awaiting_stmc = False
         self._state = PlayerState.BUFFERING
         self.signal_update()
 
@@ -993,6 +1003,11 @@ class SlimClient:
 
     async def _process_resp(self, data: bytes) -> None:
         """Process incoming RESP message: Response received at player."""
+        if self._awaiting_stmc:
+            # a RESP before the new stream's STMc is for a stream the player dropped;
+            # its codc and cont would otherwise land on the new stream and stall it
+            self.logger.debug("Ignoring RESP of a previous stream.")
+            return
         self.logger.debug("RESP received - Response received at player.")
         _, status_code, status = parse_status(data)
         headers = parse_headers(data)
@@ -1003,10 +1018,11 @@ class SlimClient:
             self.logger.debug("Received redirect to %s", location)
             await self.play_url(
                 location,
-                self.next_media.mime_type,
-                self.next_media.metadata,
-                self.next_media.transition,
-                self.next_media.transition_duration,
+                self._buffering_media.mime_type,
+                self._buffering_media.metadata,
+                self._buffering_media.transition,
+                self._buffering_media.transition_duration,
+                autostart=self._auto_play,
             )
             return
 
