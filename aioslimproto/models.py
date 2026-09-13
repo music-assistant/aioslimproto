@@ -246,6 +246,8 @@ class MediaDetails:
     metadata: MediaMetadata = field(default_factory=dict)
     transition: TransitionType = TransitionType.NONE
     transition_duration: int = 0
+    stream_threshold: int = 200  # KB
+    output_threshold: int = 20  # tenths of a second
 
 
 @dataclass
