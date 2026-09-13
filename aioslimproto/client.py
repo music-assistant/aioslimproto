@@ -831,8 +831,8 @@ class SlimClient:
             # Presumed informational stat message
             return
         event_handler = getattr(self, f"_process_stat_{event.lower()}", None)
-        # run the handler here instead of scheduling it, so the event is handled
-        # before any packet that followed it (e.g. the RESP after an STMc)
+        # handled inline, so stat events start in arrival order with other packets
+        # (e.g. an STMc before the RESP that follows it)
         if event_handler is None:
             self.logger.debug("Unhandled event: %s - event_data: %s", event, event_data)
         elif inspect.iscoroutinefunction(event_handler):

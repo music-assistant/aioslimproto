@@ -311,6 +311,26 @@ class TestStaleRespIsIgnored:
         ]
 
     @pytest.mark.asyncio
+    async def test_stored_enqueue_keeps_current_resp(
+        self, live_client: SlimClient
+    ) -> None:
+        """A stored enqueue sends no strm-s, so the current stream keeps its RESP."""
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.play_url(url=_TRACK_URL, mime_type="audio/wav")
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.play_url(
+            url="http://127.0.0.1:8080/next.wav", enqueue=True, send_flush=False
+        )
+        live_client.send_frame = AsyncMock()
+
+        await live_client._process_resp(_RESP_OK)  # noqa: SLF001
+
+        assert live_client.send_frame.await_args_list == [
+            call(b"codc", b"p1321"),
+            call(b"cont", _CONT_PAYLOAD),
+        ]
+
+    @pytest.mark.asyncio
     async def test_player_without_stmc_still_gets_cont(
         self, live_client: SlimClient
     ) -> None:
