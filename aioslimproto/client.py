@@ -515,7 +515,9 @@ class SlimClient:
         await self._send_strm(
             command=b"s",
             codec_details=codec_details,
-            autostart=b"3" if autostart else b"0",
+            # the player holds the body back until our cont, so the codc sent on
+            # its RESP lands first (a codc re-opens the decoder, dropping its buffer)
+            autostart=b"3" if autostart else b"2",
             server_port=port,
             server_ip=int(ipaddress.ip_address(ipaddr)),
             threshold=200,
@@ -961,7 +963,7 @@ class SlimClient:
     def _process_stat_stml(self, data: bytes) -> None:
         """Process incoming stat STMl message: Buffer threshold reached."""
         self.logger.debug("STMl received - Buffer threshold reached.")
-        # this is only used when autostart < 2 on strm-s commands
+        # only sent for streams started without autostart
         # send an event for lib consumers to handle
         self._state = PlayerState.BUFFER_READY
         self.callback(self, EventType.PLAYER_BUFFER_READY)
@@ -1015,6 +1017,8 @@ class SlimClient:
             self._buffering_media = None
             self._next_media = None
             self.signal_update()
+            # the player holds the body back until cont, release it to end this stream
+            await self._send_cont()
             return
 
         if "content-type" in headers:
@@ -1038,9 +1042,13 @@ class SlimClient:
         ):
             self._buffering_media.metadata["title"] = headers["icy-name"]
 
-        # send continue (used when autoplay 1 or 3)
-        if self._auto_play:
-            await self.send_frame(b"cont", b"1")
+        # the player holds the body back until cont, so cont must follow the codc
+        await self._send_cont()
+
+    async def _send_cont(self) -> None:
+        """Let the player start reading the stream body it holds back until cont."""
+        # metaint 0 (the body carries no ICY metadata) and loop 0
+        await self.send_frame(b"cont", struct.pack("!IB", 0, 0))
 
     def _process_setd(self, data: bytes) -> None:
         """Process incoming SETD message: Get/set player firmware settings."""

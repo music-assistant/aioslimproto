@@ -1,7 +1,8 @@
 """Tests for SlimClient's next-media promotion on STMd/STMu."""
 
 import asyncio
-from unittest.mock import AsyncMock, Mock
+import struct
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -172,4 +173,59 @@ class TestStopInvalidatesEnqueuedMedia:
         await client._process_stat_stmu(b"")  # noqa: SLF001
 
         client.play_url.assert_not_called()
+        assert client.state == PlayerState.STOPPED
+
+
+# what squeezelite reads from a cont frame: metaint (no ICY metadata) and loop
+_CONT_PAYLOAD = struct.pack("!IB", 0, 0)
+
+
+class TestStreamBodyWaitsForCont:
+    """The player must not read the stream body before our codc resets its buffer."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("autostart", "expected"), [(False, b"2"), (True, b"3")])
+    async def test_play_url_holds_body_until_cont(
+        self, live_client: SlimClient, *, autostart: bool, expected: bytes
+    ) -> None:
+        """Both start modes make the player wait for cont before reading the body."""
+        await live_client.play_url(
+            url="http://127.0.0.1:8080/track.wav",
+            mime_type="audio/wav",
+            autostart=autostart,
+        )
+
+        strm = live_client._send_strm.call_args.kwargs  # noqa: SLF001
+        assert strm["command"] == b"s"
+        assert strm["autostart"] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("autostart", [False, True])
+    async def test_resp_sends_cont_after_codc(
+        self, client: SlimClient, *, autostart: bool
+    ) -> None:
+        """The cont that releases the body always follows the codc."""
+        client._auto_play = autostart  # noqa: SLF001
+        client.send_frame = AsyncMock()
+
+        await client._process_resp(  # noqa: SLF001
+            b"HTTP/1.0 200 OK\r\n"
+            b"Content-Type: audio/wav;rate=44100;bitrate=24;channels=2\r\n\r\n"
+        )
+
+        assert client.send_frame.await_args_list == [
+            call(b"codc", b"p2321"),
+            call(b"cont", _CONT_PAYLOAD),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_error_response_still_releases_the_player(
+        self, client: SlimClient
+    ) -> None:
+        """A player holding back an error body would otherwise wait forever."""
+        client.send_frame = AsyncMock()
+
+        await client._process_resp(b"HTTP/1.0 404 Not Found\r\n\r\n")  # noqa: SLF001
+
+        client.send_frame.assert_awaited_once_with(b"cont", _CONT_PAYLOAD)
         assert client.state == PlayerState.STOPPED
