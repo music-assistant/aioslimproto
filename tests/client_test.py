@@ -11,6 +11,8 @@ from aioslimproto.models import MediaDetails, PlayerState
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
+_TRACK_URL = "http://127.0.0.1:8080/track.wav"
+_RESP_OK = b"HTTP/1.0 200 OK\r\nContent-Type: audio/wav\r\n\r\n"
 
 
 @pytest.fixture
@@ -51,6 +53,11 @@ def _enqueue_next_media(client: SlimClient) -> MediaDetails:
     media = MediaDetails(url="http://example.com/next.mp3")
     client._next_media = media  # noqa: SLF001
     return media
+
+
+def _frame(operation: bytes, payload: bytes) -> bytes:
+    """Build a packet as the player sends it: operation, payload length, payload."""
+    return operation + struct.pack("!I", len(payload)) + payload
 
 
 class TestPromoteNextMediaOnStmu:
@@ -239,3 +246,130 @@ class TestStreamBodyWaitsForCont:
         await client._process_resp(b"HTTP/1.0 200 OK\r\n\r\n")  # noqa: SLF001
 
         client.send_frame.assert_awaited_once_with(b"cont", _CONT_PAYLOAD)
+
+
+class TestStaleRespIsIgnored:
+    """A RESP of a stream the player already dropped must not reach the new stream."""
+
+    @pytest.mark.asyncio
+    async def test_resp_before_stmc_is_ignored(self, live_client: SlimClient) -> None:
+        """A RESP read between strm-s and its STMc belongs to the dropped stream."""
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.play_url(url=_TRACK_URL, mime_type="audio/wav")
+        live_client.send_frame = AsyncMock()
+
+        await live_client._process_resp(_RESP_OK)  # noqa: SLF001
+
+        live_client.send_frame.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resp_after_stmc_is_handled(self, live_client: SlimClient) -> None:
+        """The new stream's own RESP, which follows its STMc, gets codc and cont."""
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.play_url(url=_TRACK_URL, mime_type="audio/wav")
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        live_client.send_frame = AsyncMock()
+
+        await live_client._process_resp(_RESP_OK)  # noqa: SLF001
+
+        assert live_client.send_frame.await_args_list == [
+            call(b"codc", b"p1321"),
+            call(b"cont", _CONT_PAYLOAD),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_resp_read_together_with_its_stmc_is_handled(
+        self, writer: Mock
+    ) -> None:
+        """Packets from one read are handled in the order the player sent them."""
+        reader = asyncio.StreamReader()
+        slim_client = SlimClient(reader, writer, Mock())
+        slim_client._send_strm = AsyncMock()  # noqa: SLF001
+        slim_client._powered = True  # noqa: SLF001
+        slim_client._process_stat_stmc(b"")  # noqa: SLF001
+        await slim_client.play_url(url=_TRACK_URL, mime_type="audio/wav")
+        cont_sent = asyncio.Event()
+
+        async def send_frame(command: bytes, _data: bytes) -> None:
+            if command == b"cont":
+                cont_sent.set()
+
+        slim_client.send_frame = AsyncMock(side_effect=send_frame)
+
+        # STMc with its status fields zeroed, directly followed by the RESP
+        reader.feed_data(
+            _frame(b"STAT", b"STMc" + bytes(49)) + _frame(b"RESP", _RESP_OK)
+        )
+
+        try:
+            await asyncio.wait_for(cont_sent.wait(), 1)
+        finally:
+            slim_client._reader_task.cancel()  # noqa: SLF001
+        assert slim_client.send_frame.await_args_list == [
+            call(b"codc", b"p1321"),
+            call(b"cont", _CONT_PAYLOAD),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stored_enqueue_keeps_current_resp(
+        self, live_client: SlimClient
+    ) -> None:
+        """A stored enqueue sends no strm-s, so the current stream keeps its RESP."""
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.play_url(url=_TRACK_URL, mime_type="audio/wav")
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.play_url(
+            url="http://127.0.0.1:8080/next.wav", enqueue=True, send_flush=False
+        )
+        live_client.send_frame = AsyncMock()
+
+        await live_client._process_resp(_RESP_OK)  # noqa: SLF001
+
+        assert live_client.send_frame.await_args_list == [
+            call(b"codc", b"p1321"),
+            call(b"cont", _CONT_PAYLOAD),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_player_without_stmc_still_gets_cont(
+        self, live_client: SlimClient
+    ) -> None:
+        """A player that never sent STMc can't be guarded, so its RESP is handled."""
+        await live_client.play_url(url=_TRACK_URL, mime_type="audio/wav")
+        live_client.send_frame = AsyncMock()
+
+        await live_client._process_resp(_RESP_OK)  # noqa: SLF001
+
+        assert live_client.send_frame.await_args_list == [
+            call(b"codc", b"p1321"),
+            call(b"cont", _CONT_PAYLOAD),
+        ]
+
+
+class TestRedirect:
+    """A redirect restarts the stream being set up at the new location."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("autostart", [False, True])
+    async def test_redirect_keeps_media_and_start_mode(
+        self, client: SlimClient, *, autostart: bool
+    ) -> None:
+        """The new stream keeps the details and start mode it was requested with."""
+        media = MediaDetails(
+            url=_TRACK_URL, mime_type="audio/wav", metadata={"title": "Track"}
+        )
+        client._buffering_media = media  # noqa: SLF001
+        client._auto_play = autostart  # noqa: SLF001
+
+        await client._process_resp(  # noqa: SLF001
+            b"HTTP/1.0 302 Found\r\nLocation: http://127.0.0.1:8081/track.wav\r\n\r\n"
+        )
+
+        client.play_url.assert_awaited_once_with(
+            "http://127.0.0.1:8081/track.wav",
+            media.mime_type,
+            media.metadata,
+            media.transition,
+            media.transition_duration,
+            autostart=autostart,
+        )
