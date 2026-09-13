@@ -1,4 +1,4 @@
-"""Tests for SlimClient's next-media promotion on STMd/STMu."""
+"""Tests for SlimClient's stream start and next-media promotion."""
 
 import asyncio
 import struct
@@ -8,6 +8,9 @@ import pytest
 
 from aioslimproto.client import SlimClient
 from aioslimproto.models import MediaDetails, PlayerState
+
+# a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
+_CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
 
 
 @pytest.fixture
@@ -176,10 +179,6 @@ class TestStopInvalidatesEnqueuedMedia:
         assert client.state == PlayerState.STOPPED
 
 
-# what squeezelite reads from a cont frame: metaint (no ICY metadata) and loop
-_CONT_PAYLOAD = struct.pack("!IB", 0, 0)
-
-
 class TestStreamBodyWaitsForCont:
     """The player must not read the stream body before our codc resets its buffer."""
 
@@ -229,3 +228,14 @@ class TestStreamBodyWaitsForCont:
 
         client.send_frame.assert_awaited_once_with(b"cont", _CONT_PAYLOAD)
         assert client.state == PlayerState.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_resp_without_content_type_still_sends_cont(
+        self, client: SlimClient
+    ) -> None:
+        """Without a codc to wait for, the body is released right away."""
+        client.send_frame = AsyncMock()
+
+        await client._process_resp(b"HTTP/1.0 200 OK\r\n\r\n")  # noqa: SLF001
+
+        client.send_frame.assert_awaited_once_with(b"cont", _CONT_PAYLOAD)

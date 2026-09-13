@@ -1047,8 +1047,8 @@ class SlimClient:
 
     async def _send_cont(self) -> None:
         """Let the player start reading the stream body it holds back until cont."""
-        # metaint 0 (the body carries no ICY metadata) and loop 0
-        await self.send_frame(b"cont", struct.pack("!IB", 0, 0))
+        # laid out like LMS: metaint 0 (no ICY metadata in the body), loop 0, no guids
+        await self.send_frame(b"cont", struct.pack("!IBH", 0, 0, 0))
 
     def _process_setd(self, data: bytes) -> None:
         """Process incoming SETD message: Get/set player firmware settings."""
