@@ -439,6 +439,7 @@ class SlimProtoCLI:
         response = []
         streaming = False
         json_msg: list[dict[str, Any]] = await request.json()
+        had_handshake = any(msg.get("channel") == "/meta/handshake" for msg in json_msg)
         # cometd message is an array of commands/messages
         for cometd_msg in json_msg:
             channel = cometd_msg.get("channel")
@@ -694,7 +695,8 @@ class SlimProtoCLI:
         if not streaming:
             # Long-polling mode: if we don't already have queued data messages,
             # hold the connection open until a message arrives or timeout (30s).
-            if not any(
+            # Never applies to a handshake response, which has nothing else to wait for and will cause a connection error in some cases
+            if not had_handshake and not any(
                 msg for msg in response if msg.get("channel", "").startswith("/slim/")
             ):
                 try:
@@ -955,8 +957,11 @@ class SlimProtoCLI:
         **kwargs,
     ) -> ServerStatusResponse:
         """Handle server status command."""
+        # Devices sometimes send ['serverstatus', '-', '-', []]]
         if start_index == "-":
             start_index = 0
+        if limit == "-":
+            limit = float("inf")
         players: list[PlayerItem] = []
         for index, player in enumerate(self.server.players):
             if isinstance(start_index, int) and index < start_index:
