@@ -955,8 +955,11 @@ class SlimProtoCLI:
         **kwargs,
     ) -> ServerStatusResponse:
         """Handle server status command."""
+        #Devices sometimes send ['serverstatus', '-', '-', []]]
         if start_index == "-":
             start_index = 0
+        if limit == "-": 
+            limit = float("inf")
         players: list[PlayerItem] = []
         for index, player in enumerate(self.server.players):
             if isinstance(start_index, int) and index < start_index:
