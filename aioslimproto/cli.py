@@ -439,6 +439,12 @@ class SlimProtoCLI:
         response = []
         streaming = False
         json_msg: list[dict[str, Any]] = await request.json()
+        had_handshake = any(msg.get("channel") == "/meta/handshake" for msg in json_msg)
+        had_slim_message = any(
+            msg.get("channel")
+            in ("/slim/subscribe", "/slim/request", "/slim/unsubscribe")
+            for msg in json_msg
+        )
         # cometd message is an array of commands/messages
         for cometd_msg in json_msg:
             channel = cometd_msg.get("channel")
@@ -694,8 +700,15 @@ class SlimProtoCLI:
         if not streaming:
             # Long-polling mode: if we don't already have queued data messages,
             # hold the connection open until a message arrives or timeout (30s).
-            if not any(
-                msg for msg in response if msg.get("channel", "").startswith("/slim/")
+            # Never applies to a handshake response, which has nothing else to wait for and will cause a connection error in some cases
+            if (
+                not had_handshake
+                and not had_slim_message
+                and not any(
+                    msg
+                    for msg in response
+                    if msg.get("channel", "").startswith("/slim/")
+                )
             ):
                 try:
                     msg = await asyncio.wait_for(cometd_client.queue.get(), timeout=30)
