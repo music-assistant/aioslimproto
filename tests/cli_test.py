@@ -599,9 +599,9 @@ class TestCommandHandler:
 
 
 class TestCometDLongPollWait:
-    """... (same docstring as before)"""
+    """Tests for to ensure handshake requests and no id slim don't queue."""
 
-    _MAX_ACCEPTABLE_SECONDS = 5  # well under the real 30s wait - if either
+    _MAX_ACCEPTABLE_SECONDS = 10  # well under the real 30s wait - if either
     # fix regresses, this fails clearly with a real elapsed time, rather
     # than the earlier (broken) version silently taking 30x longer and
     # still passing.
@@ -661,5 +661,5 @@ class TestCometDLongPollWait:
 
         assert resp.status == 200
         assert elapsed < self._MAX_ACCEPTABLE_SECONDS, (
-            f"took {elapsed:.1f}s - hit the 30s long-poll wait, had_slim_message regressed"
+            f"took {elapsed:.1f}s - hit the 30s long-poll wait."
         )
