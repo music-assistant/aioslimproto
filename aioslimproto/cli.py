@@ -700,7 +700,7 @@ class SlimProtoCLI:
         if not streaming:
             # Long-polling mode: if we don't already have queued data messages,
             # hold the connection open until a message arrives or timeout (30s).
-            # Never applies to a handshake response, which has nothing else to wait for and will cause a connection error in some cases
+            # Don't apply to no id slim messages or handshake responses
             if (
                 not had_handshake
                 and not had_slim_message
