@@ -22,11 +22,19 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 from .const import (
+    DEFAULT_MIN_SYNC_ADJUST,
+    DEFAULT_PLAY_DELAY,
+    DEFAULT_START_DELAY,
     FALLBACK_CODECS,
     FALLBACK_MODEL,
     FALLBACK_SAMPLE_RATE,
     FALLLBACK_FIRMWARE,
     HEARTBEAT_INTERVAL,
+    JIFFIES_EPOCH_MAX_ADJUST,
+    JIFFIES_EPOCH_MIN_ADJUST,
+    JIFFIES_OFFSET_TRACKING_LIST_MIN,
+    JIFFIES_OFFSET_TRACKING_LIST_SIZE,
+    PACKET_LATENCY,
 )
 from .display import SlimProtoDisplay
 from .errors import UnsupportedContentType
@@ -97,6 +105,9 @@ class SlimClient:
         self._jiffies_timestamp: float = 0
         self._last_timestamp: float = 0
         self._elapsed_milliseconds: float = 0
+        # reported whole-second counter from the same STMt status; kept alongside the
+        # millisecond field to replicate LMS (Squeezebox2::playPoint reconciles the two)
+        self._elapsed_seconds: float = 0
         # set while a new stream is requested but not yet started (STMs); used to
         # ignore trailing STMt heartbeats of the flushed stream so elapsed_time
         # doesn't keep reporting the previous position (e.g. right after a seek)
@@ -118,6 +129,17 @@ class SlimClient:
         self._reader_task = create_task(self._socket_reader())
         self._heartbeat_task: asyncio.Task | None = None
         self._presets: list[Preset] = []
+        # --- LMS-compatible sync state -----------------------------------
+        # mapping between the player's 1kHz jiffies clock and server time
+        self._jiffies_epoch: float | None = None
+        self._jiffies_offset_list: list[float] = []
+        # note: LMS's "weighted" play points for SB1/SliMP3 are not implemented
+        # per-player sync tuning (LMS prefs, in milliseconds)
+        self.start_delay: int = DEFAULT_START_DELAY
+        self.play_delay: int = DEFAULT_PLAY_DELAY
+        self.min_sync_adjust: int = DEFAULT_MIN_SYNC_ADJUST
+        self.maintain_sync: bool = True
+        self.packet_latency: float = PACKET_LATENCY
 
     def disconnect(self) -> None:
         """Disconnect and/or cleanup socket client."""
@@ -256,6 +278,113 @@ class SlimClient:
     def jiffies(self) -> int:
         """Return (realtime) epoch timestamp from player."""
         return self._jiffies + int((time.time() - self._jiffies_timestamp) * 1000)
+
+    # ------------------------------------------------------------------
+    # LMS-compatible clock mapping and play points
+    # (port of Slim::Player::Player / Slim::Player::Squeezebox2)
+    # ------------------------------------------------------------------
+
+    @property
+    def tics_per_sec(self) -> int:
+        """Return the player's jiffies clock rate (1kHz)."""
+        return 1000
+
+    @property
+    def jiffies_epoch(self) -> float:
+        """Return the offset mapping player jiffies to server time (seconds)."""
+        return self._jiffies_epoch or 0.0
+
+    def track_jiffies_epoch(self, jiffies: int, timestamp: float) -> None:
+        """Track the offset between the player jiffies clock and server time.
+
+        Direct port of Slim::Player::Player::trackJiffiesEpoch: it keeps the
+        smallest observed offset (least queueing delay) and slowly nudges the
+        epoch to follow clock drift.
+        """
+        jiffies_time = jiffies / self.tics_per_sec
+        offset = timestamp - jiffies_time
+        epoch = self._jiffies_epoch or 0.0
+
+        if offset < epoch or offset - epoch > 50:  # better estimate or wrap-around
+            epoch = offset
+            self._jiffies_epoch = epoch
+
+        diff = offset - epoch
+        offsets = self._jiffies_offset_list
+        offsets.insert(0, diff)
+        if len(offsets) > JIFFIES_OFFSET_TRACKING_LIST_SIZE:
+            offsets.pop()
+
+        if diff > 0.001 and len(offsets) >= JIFFIES_OFFSET_TRACKING_LIST_MIN:
+            min_diff = min(offsets)
+            if min_diff > JIFFIES_EPOCH_MIN_ADJUST:
+                if (
+                    min_diff > JIFFIES_EPOCH_MAX_ADJUST
+                    and len(offsets) < JIFFIES_OFFSET_TRACKING_LIST_SIZE
+                ):
+                    # wait until we have a full list before a larger jump
+                    return
+                self._jiffies_epoch = epoch + min_diff
+                offsets.clear()
+
+    def jiffies_to_timestamp(self, jiffies: int) -> float:
+        """Translate a player jiffies value into a server timestamp."""
+        return self.jiffies_epoch + jiffies / self.tics_per_sec - self.packet_latency
+
+    @property
+    def play_point(self) -> tuple[float, float, float] | None:
+        """Return the play point (status time, apparent start, song elapsed).
+
+        Port of Slim::Player::Squeezebox2::playPoint. The apparent stream start
+        time normalizes away per-player buffer/decoder differences, so two
+        players that are in sync share the same value. The song elapsed time is
+        used to align a group resume (see :meth:`SyncGroup.resume`).
+        """
+        if self._jiffies_epoch is None or not self._elapsed_milliseconds:
+            return None
+        status_time = self.jiffies_to_timestamp(self._jiffies)
+        elapsed_ms = self._elapsed_milliseconds
+        # Replicates LMS Squeezebox2::playPoint: the two independent STMt status
+        # fields (elapsed_milliseconds and elapsed_seconds) can transiently disagree,
+        # so trust the seconds counter for the whole part and the ms field only for
+        # the sub-second fraction.
+        song_elapsed = elapsed_ms / 1000
+        if song_elapsed < self._elapsed_seconds:
+            song_elapsed = self._elapsed_seconds + (elapsed_ms % 1000) / 1000
+        return (status_time, status_time - elapsed_ms / 1000, song_elapsed)
+
+    @property
+    def can_skip_ahead(self) -> bool:
+        """Return if this player supports the strm 'a' (skip ahead) command.
+
+        Always True here; LMS gates this on the player's skipAhead capability
+        (SB1/SliMP3 return False), which is not implemented.
+        """
+        return True
+
+    @property
+    def can_pause_for(self) -> bool:
+        """Return if this player supports the strm 'p' (pause interval) command.
+
+        Always True here; LMS gates this on the player's pauseForInterval
+        capability (SB1 cannot reliably pause), which is not implemented.
+        """
+        return True
+
+    async def start_at(self, server_time: float) -> None:
+        """Unpause the player so it starts at the given server time (epoch s)."""
+        if self._jiffies_epoch is None:
+            # No STMt has set the clock epoch yet; a silent no-op would strand the
+            # player (it never unpauses). Fall back to a plain unpause (strm u),
+            # matching LMS resume() without a start time.
+            self.logger.warning(
+                "start_at called before the jiffies epoch was known; "
+                "falling back to a plain unpause"
+            )
+            await self.unpause_at(0)
+            return
+        interval = int((server_time - self._jiffies_epoch) * self.tics_per_sec)
+        await self.unpause_at(max(0, interval))
 
     @property
     def current_url(self) -> str | None:
@@ -433,6 +562,7 @@ class SlimClient:
             # until the new stream starts (STMs), so we don't report the old
             # position (e.g. right after a seek)
             self._elapsed_milliseconds = 0
+            self._elapsed_seconds = 0
             self._last_timestamp = time.time()
             self._awaiting_stream_start = True
 
@@ -912,6 +1042,7 @@ class SlimClient:
         # a new track just started at position 0; reset the elapsed baseline and
         # resume honouring STMt heartbeats (they now report the new stream)
         self._elapsed_milliseconds = 0
+        self._elapsed_seconds = 0
         self._last_timestamp = time.time()
         self._awaiting_stream_start = False
         if self._buffering_media:
@@ -935,7 +1066,7 @@ class SlimClient:
             jiffies,
             _output_buffer_size,
             _output_buffer_readyness,
-            _elapsed_seconds,
+            elapsed_seconds,
             _voltage,
             elapsed_milliseconds,
             _server_heartbeat,
@@ -945,12 +1076,15 @@ class SlimClient:
         self._jiffies = jiffies
         self._jiffies_timestamp = now
         self._last_timestamp = now
+        self.track_jiffies_epoch(jiffies, now)
         if self._awaiting_stream_start:
             # trailing heartbeat of the flushed stream: keep elapsed at 0 until the
             # new stream starts (STMs), so we don't surface the old position
             self._elapsed_milliseconds = 0
+            self._elapsed_seconds = 0
         else:
             self._elapsed_milliseconds = elapsed_milliseconds
+            self._elapsed_seconds = elapsed_seconds
         self.callback(self, EventType.PLAYER_HEARTBEAT)
 
     async def _process_stat_stmu(self, data: bytes) -> None:
