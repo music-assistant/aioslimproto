@@ -92,6 +92,9 @@ class SlimClient:
         self._muted: bool = False
         self._state = PlayerState.STOPPED
         self._jiffies: int = 0
+        # when _jiffies was reported; kept apart from _last_timestamp, which is
+        # also reset when a stream is flushed or started
+        self._jiffies_timestamp: float = 0
         self._last_timestamp: float = 0
         self._elapsed_milliseconds: float = 0
         # set while a new stream is requested but not yet started (STMs); used to
@@ -252,7 +255,7 @@ class SlimClient:
     @property
     def jiffies(self) -> int:
         """Return (realtime) epoch timestamp from player."""
-        return self._jiffies + int((time.time() - self._last_timestamp) * 1000)
+        return self._jiffies + int((time.time() - self._jiffies_timestamp) * 1000)
 
     @property
     def current_url(self) -> str | None:
@@ -953,8 +956,10 @@ class SlimClient:
             server_heartbeat,
         ) = struct.unpack("!BBBLLLLHLLLLHLL", data[:47])
 
+        now = time.time()
         self._jiffies = jiffies
-        self._last_timestamp = time.time()
+        self._jiffies_timestamp = now
+        self._last_timestamp = now
         if self._awaiting_stream_start:
             # trailing heartbeat of the flushed stream: keep elapsed at 0 until the
             # new stream starts (STMs), so we don't surface the old position
