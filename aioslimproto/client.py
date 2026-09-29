@@ -330,8 +330,7 @@ class SlimClient:
             return
         if not powered:
             await self.stop()
-        power_int = 1 if powered else 0
-        await self.send_frame(b"aude", struct.pack("2B", power_int, 1))
+        await self._send_power(powered)
         self._powered = powered
         self.signal_update()
         await self._render_display()
@@ -345,36 +344,21 @@ class SlimClient:
         if volume_level == self.volume_control.volume:
             return
         self.volume_control.volume = volume_level
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
-        )
+        await self._send_gain()
         self.signal_update()
         await self._render_display("show_volume")
 
     async def volume_up(self) -> None:
         """Send volume up command to player."""
         self.volume_control.increment()
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
-        )
+        await self._send_gain()
         self.signal_update()
         await self._render_display("show_volume")
 
     async def volume_down(self) -> None:
         """Send volume down command to player."""
         self.volume_control.decrement()
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
-        )
+        await self._send_gain()
         self.signal_update()
         await self._render_display("show_volume")
 
@@ -735,8 +719,9 @@ class SlimClient:
         # restore last power and volume levels
         # NOTE: this can be improved by storing the previous volume/power levels
         # so they can be restored when the player (re)connects.
-        await self.power(self._powered)
-        await self.volume_set(self.volume_level)
+        # power() and volume_set() skip unchanged values, but the player has none yet
+        await self._send_power(self._powered)
+        await self._send_gain()
         self._connected = True
         self._heartbeat_task = asyncio.create_task(self._send_heartbeat())
         self.callback(self, EventType.PLAYER_CONNECTED)
@@ -1173,3 +1158,16 @@ class SlimClient:
             else:
                 codc_msg = FORMAT_BYTE[codec] + b"????"
         return codc_msg
+
+    async def _send_power(self, powered: bool) -> None:
+        """Send a power state to the player."""
+        await self.send_frame(b"aude", struct.pack("2B", int(powered), 1))
+
+    async def _send_gain(self) -> None:
+        """Send the current volume level to the player."""
+        old_gain = self.volume_control.old_gain()
+        new_gain = self.volume_control.new_gain()
+        await self.send_frame(
+            b"audg",
+            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
+        )

@@ -481,3 +481,40 @@ class TestByeCommand:
         await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
 
         assert slim_client.connected is False
+
+
+class TestRestoreOnHelo:
+    """A connecting player gets its volume and power state, even when unchanged."""
+
+    _HELO = bytes([12, 0]) + b"\xaa\xbb\xcc\xdd\xee\xff" + bytes(28)
+
+    async def _connect(self, client: SlimClient, command: bytes) -> list[bytes]:
+        """Process a squeezelite HELO; return the payloads sent for command."""
+        client.send_frame = AsyncMock()
+        await client._process_helo(self._HELO + b"Model=squeezelite,flc")  # noqa: SLF001
+        client.disconnect()
+        return [
+            frame.args[1]
+            for frame in client.send_frame.await_args_list
+            if frame.args[0] == command
+        ]
+
+    @pytest.mark.asyncio
+    async def test_helo_sends_default_volume(self, client: SlimClient) -> None:
+        """Skipping the unchanged default level must not leave the player silent."""
+        audg_payloads = await self._connect(client, b"audg")
+
+        assert len(audg_payloads) == 1
+        new_gain = client.volume_control.new_gain()
+        assert struct.unpack("!LLBBLL", audg_payloads[0])[4:] == (new_gain, new_gain)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("powered", [True, False])
+    async def test_helo_sends_power_state(
+        self, client: SlimClient, *, powered: bool
+    ) -> None:
+        """The player gets the cached power state, which power() would skip."""
+        client._powered = powered  # noqa: SLF001
+        aude_payloads = await self._connect(client, b"aude")
+
+        assert aude_payloads == [struct.pack("2B", int(powered), 1)]
