@@ -8,11 +8,13 @@ full 40-character commit SHA. Local refs (`./...`) and Docker refs
     python3 scripts/audit-action-pins.py
 """
 
+# ruff: noqa: T201
+
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
 
 try:
     import yaml
@@ -36,7 +38,8 @@ def find_uses_refs(text: str) -> list[str]:
 
 
 def is_pinned(ref: str) -> bool:
-    if ref.startswith("./") or ref.startswith("docker://"):
+    """Return True if the ref is local, Docker or pinned to a full commit SHA."""
+    if ref.startswith(("./", "docker://")):
         return True
     if "@" not in ref:
         return False
@@ -45,6 +48,7 @@ def is_pinned(ref: str) -> bool:
 
 
 def validate_yaml(path: Path) -> str | None:
+    """Return the YAML parse error for the file, or None if it is valid."""
     if yaml is None:
         return None
     try:
@@ -55,6 +59,7 @@ def validate_yaml(path: Path) -> str | None:
 
 
 def main() -> int:
+    """Audit all workflows and return the process exit code."""
     if not WORKFLOWS_DIR.is_dir():
         print(f"No workflows directory found at {WORKFLOWS_DIR}", file=sys.stderr)
         return 1
@@ -67,9 +72,11 @@ def main() -> int:
         if error:
             yaml_errors.append((path, error))
             continue
-        for ref in find_uses_refs(path.read_text()):
-            if not is_pinned(ref):
-                unpinned.append((path, ref))
+        unpinned.extend(
+            (path, ref)
+            for ref in find_uses_refs(path.read_text())
+            if not is_pinned(ref)
+        )
 
     if yaml_errors:
         print("YAML validation errors:")
@@ -84,8 +91,8 @@ def main() -> int:
     if yaml_errors or unpinned:
         return 1
 
-    suffix = "" if yaml is not None else " (YAML syntax check skipped: pyyaml not installed)"
-    print(f"OK: all external action refs are pinned to full commit SHAs and YAML is valid.{suffix}")
+    suffix = "" if yaml is not None else " (YAML check skipped: pyyaml not installed)"
+    print(f"OK: all external action refs are pinned and YAML is valid.{suffix}")
     return 0
 
 
