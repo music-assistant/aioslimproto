@@ -1159,7 +1159,7 @@ class SlimProtoCLI:
             return
         if subcommand.startswith("preset_") and subcommand.endswith(".single"):
             # only handle http-based presets, ignore/forward all other
-            preset_id = subcommand.split("preset_")[1].split(".")[0]
+            preset_id = subcommand.split("preset_")[1].split(".", maxsplit=1)[0]
             preset_index = int(preset_id) - 1
             if len(player.presets) >= preset_index + 1:
                 preset = player.presets[preset_index]
