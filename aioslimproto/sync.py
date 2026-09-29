@@ -4,6 +4,7 @@ Ported from Lyrion Music Server:
 
 - ``Slim::Player::StreamingController::_CheckSync`` -> :meth:`SyncGroup.check`
 - ``Slim::Player::StreamingController::_syncStart`` -> :meth:`SyncGroup.start`
+- ``Slim::Player::StreamingController::_Resume`` -> :meth:`SyncGroup.resume`
 
 The per-player clock mapping and play points live on :class:`SlimClient`.
 """
@@ -19,6 +20,7 @@ from .const import (
     MAX_DEVIATION_ADJUST,
     MIN_DEVIATION_ADJUST,
     PLAYPOINT_RECENT_THRESHOLD,
+    SYNC_RESUME_HOLDOFF,
     SYNC_START_DELAY,
 )
 
@@ -68,6 +70,49 @@ class SyncGroup:
                 (target - now) * 1000,
             )
             await client.start_at(target)
+
+    async def resume(
+        self,
+        clients: Iterable[SlimClient],
+        paused_at: float,
+        now: float | None = None,
+    ) -> None:
+        """Resume a paused group in sync (port of ``_Resume``).
+
+        Mirrors LMS ``StreamingController::_Resume``: a single player is resumed
+        plainly, while a group is resumed at a common server instant with each
+        player delayed by however far past the pause point its reported song
+        position has moved. The first sync check is held off
+        (``SYNC_RESUME_HOLDOFF``) so it does not compare play points taken while
+        paused. LMS also fades the group back in; that is not ported (aioslimproto
+        has no fade infrastructure).
+
+        :param clients: The clients in the group.
+        :param paused_at: The song position (seconds) at which the group was paused.
+        :param now: Optional server time override (for testing).
+        """
+        clients = list(clients)
+        now = now if now is not None else time.time()
+
+        if len(clients) < 2:
+            for client in clients:
+                await client.unpause_at(0)
+            return
+
+        start_at_base = now + SYNC_START_DELAY / 1000
+        for client in clients:
+            start_at = start_at_base
+            play_point = client.play_point
+            if play_point is not None and (delay := play_point[2] - paused_at) >= 0:
+                start_at += delay
+            LOGGER.debug(
+                "%s resume startAt in %.1fms",
+                client.player_id,
+                (start_at - now) * 1000,
+            )
+            await client.start_at(start_at)
+
+        self.next_check = start_at_base + SYNC_RESUME_HOLDOFF
 
     async def check(
         self,

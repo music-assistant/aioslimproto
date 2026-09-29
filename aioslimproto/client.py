@@ -102,6 +102,9 @@ class SlimClient:
         self._jiffies: int = 0
         self._last_timestamp: float = 0
         self._elapsed_milliseconds: float = 0
+        # reported whole-second counter from the same STMt status; kept alongside the
+        # millisecond field to replicate LMS (Squeezebox2::playPoint reconciles the two)
+        self._elapsed_seconds: float = 0
         # set while a new stream is requested but not yet started (STMs); used to
         # ignore trailing STMt heartbeats of the flushed stream so elapsed_time
         # doesn't keep reporting the previous position (e.g. right after a seek)
@@ -326,18 +329,26 @@ class SlimClient:
         return self.jiffies_epoch + jiffies / self.tics_per_sec - self.packet_latency
 
     @property
-    def play_point(self) -> tuple[float, float] | None:
-        """Return (status_time, apparent_stream_start_time) in server time.
+    def play_point(self) -> tuple[float, float, float] | None:
+        """Return the play point (status time, apparent start, song elapsed).
 
         Port of Slim::Player::Squeezebox2::playPoint. The apparent stream start
         time normalizes away per-player buffer/decoder differences, so two
-        players that are in sync share the same value.
+        players that are in sync share the same value. The song elapsed time is
+        used to align a group resume (see :meth:`SyncGroup.resume`).
         """
         if self._jiffies_epoch is None or not self._elapsed_milliseconds:
             return None
         status_time = self.jiffies_to_timestamp(self._jiffies)
-        elapsed_seconds = self._elapsed_milliseconds / 1000
-        return (status_time, status_time - elapsed_seconds)
+        elapsed_ms = self._elapsed_milliseconds
+        # Replicates LMS Squeezebox2::playPoint: the two independent STMt status
+        # fields (elapsed_milliseconds and elapsed_seconds) can transiently disagree,
+        # so trust the seconds counter for the whole part and the ms field only for
+        # the sub-second fraction.
+        song_elapsed = elapsed_ms / 1000
+        if song_elapsed < self._elapsed_seconds:
+            song_elapsed = self._elapsed_seconds + (elapsed_ms % 1000) / 1000
+        return (status_time, status_time - elapsed_ms / 1000, song_elapsed)
 
     @property
     def can_skip_ahead(self) -> bool:
@@ -360,6 +371,14 @@ class SlimClient:
     async def start_at(self, server_time: float) -> None:
         """Unpause the player so it starts at the given server time (epoch s)."""
         if self._jiffies_epoch is None:
+            # No STMt has set the clock epoch yet; a silent no-op would strand the
+            # player (it never unpauses). Fall back to a plain unpause (strm u),
+            # matching LMS resume() without a start time.
+            self.logger.warning(
+                "start_at called before the jiffies epoch was known; "
+                "falling back to a plain unpause"
+            )
+            await self.unpause_at(0)
             return
         interval = int((server_time - self._jiffies_epoch) * self.tics_per_sec)
         await self.unpause_at(max(0, interval))
@@ -556,6 +575,7 @@ class SlimClient:
             # until the new stream starts (STMs), so we don't report the old
             # position (e.g. right after a seek)
             self._elapsed_milliseconds = 0
+            self._elapsed_seconds = 0
             self._last_timestamp = time.time()
             self._awaiting_stream_start = True
 
@@ -1034,6 +1054,7 @@ class SlimClient:
         # a new track just started at position 0; reset the elapsed baseline and
         # resume honouring STMt heartbeats (they now report the new stream)
         self._elapsed_milliseconds = 0
+        self._elapsed_seconds = 0
         self._last_timestamp = time.time()
         self._awaiting_stream_start = False
         if self._buffering_media:
@@ -1071,8 +1092,10 @@ class SlimClient:
             # trailing heartbeat of the flushed stream: keep elapsed at 0 until the
             # new stream starts (STMs), so we don't surface the old position
             self._elapsed_milliseconds = 0
+            self._elapsed_seconds = 0
         else:
             self._elapsed_milliseconds = elapsed_milliseconds
+            self._elapsed_seconds = elapsed_seconds
         self.callback(self, EventType.PLAYER_HEARTBEAT)
 
     async def _process_stat_stmu(self, data: bytes) -> None:

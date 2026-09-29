@@ -93,13 +93,14 @@ class TestPlayPoint:
     async def test_computes_status_and_apparent_start(
         self, make_client: MakeClient
     ) -> None:
-        """A play point is (status_time, status_time - elapsed)."""
+        """A play point is (status_time, status_time - elapsed, song_elapsed)."""
         client = make_client()
         client._jiffies_epoch = 0.0  # noqa: SLF001
         client._jiffies = 10_000_000  # noqa: SLF001
         client._elapsed_milliseconds = 2000  # noqa: SLF001
+        client._elapsed_seconds = 2  # noqa: SLF001
 
-        assert client.play_point == (10_000.0, 9_998.0)
+        assert client.play_point == (10_000.0, 9_998.0, 2.0)
 
     async def test_none_without_elapsed(self, make_client: MakeClient) -> None:
         """No play point is available before the player reports playback."""

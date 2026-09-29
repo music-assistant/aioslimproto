@@ -46,3 +46,6 @@ DEFAULT_START_DELAY = 0  # ms
 
 # StreamingController::_syncStart
 SYNC_START_DELAY = 200  # ms
+
+# StreamingController::_Resume: nextCheckSyncTime = startAtBase + SYNC_RESUME_HOLDOFF
+SYNC_RESUME_HOLDOFF = 2.0  # s
