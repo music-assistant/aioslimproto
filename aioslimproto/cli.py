@@ -438,6 +438,7 @@ class SlimProtoCLI:
         clientid: str = ""
         response = []
         streaming = False
+        long_poll = False
         json_msg: list[dict[str, Any]] = await request.json()
         # cometd message is an array of commands/messages
         for cometd_msg in json_msg:
@@ -525,6 +526,7 @@ class SlimProtoCLI:
                 # (re)connect message
                 logger.debug("Client (re-)connected: %s", clientid)
                 streaming = cometd_msg["connectionType"] == "streaming"
+                long_poll = not streaming
                 cometd_client.streaming = streaming
                 # confirm the connection
                 response.append(
@@ -692,9 +694,9 @@ class SlimProtoCLI:
             "Connection": "keep-alive",
         }
         if not streaming:
-            # Long-polling mode: if we don't already have queued data messages,
+            # Long-polling connect: if we don't already have queued data messages,
             # hold the connection open until a message arrives or timeout (30s).
-            if not any(
+            if long_poll and not any(
                 msg for msg in response if msg.get("channel", "").startswith("/slim/")
             ):
                 try:

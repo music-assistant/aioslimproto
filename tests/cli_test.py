@@ -2,7 +2,9 @@
 
 import asyncio
 from itertools import chain
+import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock
@@ -594,3 +596,70 @@ class TestCommandHandler:
         )
 
         assert response == encode_response("a5:41:d2:cd:cd:05", "mixer", "volume", "50")
+
+
+class TestCometDLongPollWait:
+    """Tests for to ensure handshake requests and no id slim don't queue."""
+
+    _MAX_ACCEPTABLE_SECONDS = 10  # well under the real 30s wait - if either
+    # fix regresses, this fails clearly with a real elapsed time, rather
+    # than the earlier (broken) version silently taking 30x longer and
+    # still passing.
+
+    @pytest.mark.asyncio
+    async def test_handshake_only_batch_responds_immediately(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A handshake-only batch must not hit the long-poll wait."""
+        cli = SlimProtoCLI(dummy_server)
+        request = Mock(
+            json=AsyncMock(return_value=[{"channel": "/meta/handshake", "id": "1"}])
+        )
+
+        start = time.monotonic()
+        resp = await cli._handle_cometd_client(request)  # noqa: SLF001
+        elapsed = time.monotonic() - start
+
+        assert resp.status == 200
+        assert elapsed < self._MAX_ACCEPTABLE_SECONDS, (
+            f"took {elapsed:.1f}s - hit the 30s long-poll wait, had_handshake regressed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_id_less_slim_request_responds_immediately(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """An id-less /slim/request must not hit the long-poll wait either."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+
+        handshake_request = Mock(
+            json=AsyncMock(return_value=[{"channel": "/meta/handshake", "id": "1"}])
+        )
+        handshake_resp = await cli._handle_cometd_client(handshake_request)  # noqa: SLF001
+        clientid = json.loads(handshake_resp.text)[0]["clientId"]
+
+        request = Mock(
+            json=AsyncMock(
+                return_value=[
+                    {
+                        "channel": "/slim/request",
+                        "data": {
+                            "request": [
+                                "",
+                                ["artworkspec", "add", "225x225_m", "test"],
+                            ],
+                            "response": f"/{clientid}/slim/request",
+                        },
+                    }
+                ]
+            )
+        )
+
+        start = time.monotonic()
+        resp = await cli._handle_cometd_client(request)  # noqa: SLF001
+        elapsed = time.monotonic() - start
+
+        assert resp.status == 200
+        assert elapsed < self._MAX_ACCEPTABLE_SECONDS, (
+            f"took {elapsed:.1f}s - hit the 30s long-poll wait."
+        )
