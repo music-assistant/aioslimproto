@@ -924,21 +924,21 @@ class SlimClient:
     def _process_stat_stmt(self, data: bytes) -> None:
         """Process incoming stat STMt message: heartbeat from client."""
         (
-            num_crlf,
-            mas_initialized,
-            mas_mode,
-            rptr,
-            wptr,
-            bytes_received_h,
-            bytes_received_l,
-            signal_strength,
+            _num_crlf,
+            _mas_initialized,
+            _mas_mode,
+            _rptr,
+            _wptr,
+            _bytes_received_h,
+            _bytes_received_l,
+            _signal_strength,
             jiffies,
-            output_buffer_size,
-            output_buffer_readyness,
-            elapsed_seconds,
-            voltage,
+            _output_buffer_size,
+            _output_buffer_readyness,
+            _elapsed_seconds,
+            _voltage,
             elapsed_milliseconds,
-            server_heartbeat,
+            _server_heartbeat,
         ) = struct.unpack("!BBBLLLLHLLLLHLL", data[:47])
 
         now = time.time()
