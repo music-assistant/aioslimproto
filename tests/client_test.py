@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from aioslimproto.client import SlimClient
-from aioslimproto.models import MediaDetails, PlayerState
+from aioslimproto.models import EventType, MediaDetails, PlayerState
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
@@ -456,3 +456,28 @@ class TestJiffies:
         now[0] += 0.1
 
         assert live_client.jiffies == 40_900
+
+
+class TestByeCommand:
+    """A BYE! packet must disconnect the client just like reaching EOF does."""
+
+    @pytest.mark.asyncio
+    async def test_bye_disconnects_without_eof(self, writer: Mock) -> None:
+        """BYE! must end the read loop and disconnect, with no socket EOF."""
+        reader = asyncio.StreamReader()
+        disconnected = asyncio.Event()
+
+        def callback(_client: SlimClient, event: EventType, *_args: object) -> None:
+            if event is EventType.PLAYER_DISCONNECTED:
+                disconnected.set()
+
+        slim_client = SlimClient(reader, writer, callback)
+        slim_client._connected = True  # noqa: SLF001
+
+        # real players always send a 1-byte reason (0x00 normal, 0x01 upgrade)
+        reader.feed_data(_frame(b"BYE!", b"\x00"))
+
+        await asyncio.wait_for(disconnected.wait(), 1)
+        await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
+
+        assert slim_client.connected is False
