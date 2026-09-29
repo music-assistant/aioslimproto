@@ -351,6 +351,29 @@ class SlimClient:
         return (status_time, status_time - elapsed_ms / 1000, song_elapsed)
 
     @property
+    def song_elapsed_seconds(self) -> float:
+        """Return the extrapolated song position in seconds.
+
+        Port of ``Slim::Player::Squeezebox2::songElapsedSeconds``: it reconciles the
+        two independent STMt status fields (elapsed_milliseconds and elapsed_seconds)
+        and, while the player is playing, extrapolates the reported position to the
+        current instant. LMS uses this clock for the resume point (``resumeTime``),
+        whereas :attr:`play_point` deliberately stays on the reported value.
+        """
+        elapsed_ms = self._elapsed_milliseconds
+        if not elapsed_ms and not self._elapsed_seconds:
+            return 0.0
+        song_elapsed = elapsed_ms / 1000
+        if song_elapsed < self._elapsed_seconds:
+            song_elapsed = self._elapsed_seconds + (elapsed_ms % 1000) / 1000
+        if self._state == PlayerState.PLAYING and self._jiffies_epoch is not None:
+            # extrapolate to "now" using the jiffies -> server-time mapping
+            time_diff = time.time() - self.jiffies_to_timestamp(self._jiffies)
+            if time_diff > 0:
+                song_elapsed += time_diff
+        return song_elapsed
+
+    @property
     def can_skip_ahead(self) -> bool:
         """Return if this player supports the strm 'a' (skip ahead) command.
 
