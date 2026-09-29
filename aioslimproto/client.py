@@ -330,8 +330,8 @@ class SlimClient:
             return
         if not powered:
             await self.stop()
+        await self._send_power(powered)
         self._powered = powered
-        await self._send_power()
         self.signal_update()
         await self._render_display()
 
@@ -720,7 +720,7 @@ class SlimClient:
         # NOTE: this can be improved by storing the previous volume/power levels
         # so they can be restored when the player (re)connects.
         # power() and volume_set() skip unchanged values, but the player has none yet
-        await self._send_power()
+        await self._send_power(self._powered)
         await self._send_gain()
         self._connected = True
         self._heartbeat_task = asyncio.create_task(self._send_heartbeat())
@@ -1159,9 +1159,9 @@ class SlimClient:
                 codc_msg = FORMAT_BYTE[codec] + b"????"
         return codc_msg
 
-    async def _send_power(self) -> None:
-        """Send the current power state to the player."""
-        await self.send_frame(b"aude", struct.pack("2B", int(self._powered), 1))
+    async def _send_power(self, powered: bool) -> None:
+        """Send a power state to the player."""
+        await self.send_frame(b"aude", struct.pack("2B", int(powered), 1))
 
     async def _send_gain(self) -> None:
         """Send the current volume level to the player."""
