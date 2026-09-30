@@ -201,10 +201,11 @@ class SyncGroup:
                 await client.skip_over(int(delta * 1000))
                 self.next_check += 1
             elif client.can_pause_for:
-                # LMS resumes automatically from strm 'p' (pause_for). Some devices
-                # don't (e.g. WiiM/LinkPlay); the previous provider worked around this
-                # with pause() + unpause_at(jiffies + delta). Deliberately kept
-                # LMS-faithful here - possible follow-up for those devices.
+                # Currently unreachable: every client reports can_skip_ahead, so the
+                # reference above is always the most-behind player and only the
+                # skipAhead branch runs. Becomes live once a device class reports
+                # can_skip_ahead=False (LMS gates that on SB1/SliMP3). Kept for LMS
+                # parity; the WiiM case is handled server-side with a pre-start pause.
                 LOGGER.info("%s resync: pauseFor %dms", client.player_id, delta * 1000)
                 await client.pause_for(int(delta * 1000))
                 self.next_check += delta
