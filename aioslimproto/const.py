@@ -36,11 +36,10 @@ JIFFIES_EPOCH_MAX_ADJUST = 0.005
 # per-player pref 'packetLatency' (Player.pm), applied in jiffiesToTimestamp
 PACKET_LATENCY = 0.002  # s
 
-# per-player sync defaults. Squeezebox2-class players (SB2/3, Boom, Transporter,
-# SqueezePlay, squeezelite - our targets) default to 10ms in LMS, while the
-# Player.pm base default is 30ms. This may need to change if support for the older
-# players (SB1/SliMP3) is added, or be selected per device class if that's easy.
-DEFAULT_MIN_SYNC_ADJUST = 10  # ms
+# per-player sync defaults. Player.pm base (software players and unknown
+# devices); Squeezebox2.pm uses the tighter value for Squeezebox2-class hardware.
+DEFAULT_MIN_SYNC_ADJUST = 30  # ms
+HARDWARE_MIN_SYNC_ADJUST = 10  # ms
 DEFAULT_PLAY_DELAY = 0  # ms
 DEFAULT_START_DELAY = 0  # ms
 

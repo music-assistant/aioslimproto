@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Any, TypedDict
 
+from .const import DEFAULT_MIN_SYNC_ADJUST, HARDWARE_MIN_SYNC_ADJUST
+
 
 class EventType(Enum):
     """Enum with possible slim proto client events."""
@@ -60,6 +62,37 @@ SOFTWARE_PLAYER_TYPES: frozenset[str] = frozenset(
         "softboom",
     }
 )
+
+# Squeezebox2-class hardware, which LMS tunes with the tighter Squeezebox2.pm
+# minSyncAdjust (10ms). Everything else (software players and unknown devices)
+# keeps the noisier Player.pm base default (30ms). Squeezelite reports dev_id 12
+# ("squeezeplay"), the Squeezebox Radio/Touch report dev_id 9 ("controller").
+HARDWARE_PLAYER_TYPES: frozenset[str] = frozenset(
+    {
+        "squeezebox2",
+        "transporter",
+        "receiver",
+        "boom",
+        "controller",
+    }
+)
+
+
+def min_sync_adjust_for(device_type: str) -> int:
+    """
+    Return the LMS ``minSyncAdjust`` (ms) for a player device type.
+
+    Squeezebox2-class hardware uses the tighter Squeezebox2.pm value; software
+    players and unknown devices use the Player.pm base default, whose noisier
+    clock needs a wider deadband.
+
+    :param device_type: The device type name resolved from the HELO ``dev_id``.
+    """
+    return (
+        HARDWARE_MIN_SYNC_ADJUST
+        if device_type in HARDWARE_PLAYER_TYPES
+        else DEFAULT_MIN_SYNC_ADJUST
+    )
 
 
 class PlayerState(Enum):

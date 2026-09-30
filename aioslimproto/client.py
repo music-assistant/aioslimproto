@@ -54,6 +54,7 @@ from .models import (
     RemoteCode,
     TransitionType,
     VisualisationType,
+    min_sync_adjust_for,
 )
 from .util import parse_capabilities, parse_headers, parse_status
 from .volume import SlimProtoVolume
@@ -866,6 +867,8 @@ class SlimClient:
         device_mac = ":".join(f"{x:02x}" for x in mac)
         self._player_id = str(device_mac).lower()
         self._device_type = DEVICE_TYPE.get(dev_id, "unknown device")
+        # tune the sync deadband per device class (software 30ms, SB2 hardware 10ms)
+        self.min_sync_adjust = min_sync_adjust_for(self._device_type)
         self._capabilities = parse_capabilities(data)
         self.logger.debug("Player connected: %s", self.player_id)
         # Use SqueezePlay volume params for software players (matching LMS behavior)
