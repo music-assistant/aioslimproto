@@ -48,7 +48,15 @@ class SyncGroup:
         clients: Iterable[SlimClient],
         now: float | None = None,
     ) -> None:
-        """Start all players at a common server time (port of ``_syncStart``)."""
+        """Start all players at a common server time (port of ``_syncStart``).
+
+        LMS ``_syncStart`` sets no ``nextCheckSyncTime`` holdoff (unlike
+        ``_Resume``), so the first ``_CheckSync`` can run ~1s into play and issue
+        an audible ``skipAhead``/``pauseFor`` correction for a member that landed
+        beyond its ``min_sync_adjust`` (observed: a Squeezebox Radio starting
+        ~276-441ms off a SqueezeLite). A per-player learned start offset is a
+        possible future improvement.
+        """
         clients = list(clients)
         if len(clients) < 2:
             return
@@ -84,8 +92,15 @@ class SyncGroup:
         player delayed by however far past the pause point its reported song
         position has moved. The first sync check is held off
         (``SYNC_RESUME_HOLDOFF``) so it does not compare play points taken while
-        paused. LMS also fades the group back in; that is not ported (aioslimproto
-        has no fade infrastructure).
+        paused.
+
+        Known limitation: a resumed member can be heard as a short timing gap. LMS
+        hides this behind a fade-in, but that fade is a server-side *volume* ramp
+        (``Slim::Player::Player::fade_volume`` steps the volume 0 -> stored over
+        ~0.3s), not a stream transition, and MA owns the volume (group volume,
+        limits, mute): ramping it here would fight that state and bounce the UI.
+        ``strm u`` (unpause) carries no transition either, so there is nothing
+        stream-level to reuse. Left as a known gap.
 
         :param clients: The clients in the group.
         :param paused_at: The song position (seconds) at which the group was paused.
