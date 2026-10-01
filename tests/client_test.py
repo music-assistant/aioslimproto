@@ -397,7 +397,11 @@ class TestRedirect:
     ) -> None:
         """The new stream keeps the details and start mode it was requested with."""
         media = MediaDetails(
-            url=_TRACK_URL, mime_type="audio/wav", metadata={"title": "Track"}
+            url=_TRACK_URL,
+            mime_type="audio/wav",
+            metadata={"title": "Track"},
+            stream_threshold=100,
+            output_threshold=5,
         )
         client._buffering_media = media  # noqa: SLF001
         client._auto_play = autostart  # noqa: SLF001
@@ -412,6 +416,8 @@ class TestRedirect:
             media.metadata,
             media.transition,
             media.transition_duration,
+            stream_threshold=media.stream_threshold,
+            output_threshold=media.output_threshold,
             autostart=autostart,
         )
 
