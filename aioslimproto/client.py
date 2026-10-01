@@ -1024,6 +1024,8 @@ class SlimClient:
                 self._buffering_media.metadata,
                 self._buffering_media.transition,
                 self._buffering_media.transition_duration,
+                stream_threshold=self._buffering_media.stream_threshold,
+                output_threshold=self._buffering_media.output_threshold,
                 autostart=self._auto_play,
             )
             return
