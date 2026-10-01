@@ -518,3 +518,28 @@ class TestRestoreOnHelo:
         aude_payloads = await self._connect(client, b"aude")
 
         assert aude_payloads == [struct.pack("2B", int(powered), 1)]
+
+
+class TestSetdPlayerName:
+    """SETD 0 carries the player name, with or without a NUL terminator."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (b"\x00Kitchen\x00", "Kitchen"),  # squeezelite, SqueezeESP32
+            (b"\x00Kitchen", "Kitchen"),  # SqueezePlay (Radio/Touch/Controller)
+            (b"\x00Kitchen\x00\xff\xff", "Kitchen"),
+            (b"\x00K\xfcche\x00", "K�che"),
+        ],
+    )
+    async def test_name_is_parsed(
+        self, client: SlimClient, payload: bytes, expected: str
+    ) -> None:
+        """The name ends at the first NUL, or at the end of the payload."""
+        client._process_setd(payload)  # noqa: SLF001
+
+        assert client.name == expected
+        client.callback.assert_called_with(
+            client, EventType.PLAYER_NAME_RECEIVED, expected
+        )
