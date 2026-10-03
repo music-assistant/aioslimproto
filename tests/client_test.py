@@ -549,8 +549,8 @@ class TestSetdPlayerName:
         client.callback.assert_called_with(
             client, EventType.PLAYER_NAME_RECEIVED, expected
         )
-        
-        
+
+
 class TestSocketReader:
     """The socket reader handles every complete packet it has buffered."""
 
