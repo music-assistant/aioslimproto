@@ -727,7 +727,11 @@ class SlimClient:
         # power() and volume_set() skip unchanged values, but the player has none yet
         await self._send_power(self._powered)
         await self._send_gain()
-        if self._reader.at_eof() or self._reader_task.done():
+        if (
+            self._reader.at_eof()
+            or self._writer.is_closing()
+            or self._reader_task.done()
+        ):
             # the player disconnected while we were setting it up
             return
         self._connected = True
