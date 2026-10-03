@@ -561,3 +561,20 @@ class TestSocketReader:
         handled = await self._read(writer, _frame(b"DSCO", b""))
 
         assert handled == [b""]
+
+    @pytest.mark.asyncio
+    async def test_helo_followed_by_bye_does_not_connect(self, writer: Mock) -> None:
+        """A player that says goodbye right after hello is not reported connected."""
+        reader = asyncio.StreamReader()
+        callback = Mock()
+        slim_client = SlimClient(reader, writer, callback)
+        reader.feed_data(
+            _frame(b"HELO", bytes([12, 0]) + bytes(6)) + _frame(b"BYE!", b"")
+        )
+
+        await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert not slim_client.connected
+        assert call(slim_client, EventType.PLAYER_CONNECTED) not in callback.mock_calls

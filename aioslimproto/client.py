@@ -727,6 +727,9 @@ class SlimClient:
         # power() and volume_set() skip unchanged values, but the player has none yet
         await self._send_power(self._powered)
         await self._send_gain()
+        if self._reader_task.done():
+            # the player disconnected while we were setting it up
+            return
         self._connected = True
         self._heartbeat_task = asyncio.create_task(self._send_heartbeat())
         self.callback(self, EventType.PLAYER_CONNECTED)
