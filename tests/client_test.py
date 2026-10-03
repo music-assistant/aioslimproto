@@ -563,14 +563,19 @@ class TestSocketReader:
         assert handled == [b""]
 
     @pytest.mark.asyncio
-    async def test_helo_followed_by_bye_does_not_connect(self, writer: Mock) -> None:
-        """A player that says goodbye right after hello is not reported connected."""
+    @pytest.mark.parametrize("bye", [_frame(b"BYE!", b""), None])
+    async def test_helo_followed_by_disconnect_does_not_connect(
+        self, writer: Mock, bye: bytes | None
+    ) -> None:
+        """A player that is gone right after hello is not reported connected."""
         reader = asyncio.StreamReader()
         callback = Mock()
         slim_client = SlimClient(reader, writer, callback)
-        reader.feed_data(
-            _frame(b"HELO", bytes([12, 0]) + bytes(6)) + _frame(b"BYE!", b"")
-        )
+        reader.feed_data(_frame(b"HELO", bytes([12, 0]) + bytes(6)))
+        if bye:
+            reader.feed_data(bye)
+        else:
+            reader.feed_eof()
 
         await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
         for _ in range(10):
