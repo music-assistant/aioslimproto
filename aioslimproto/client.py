@@ -632,22 +632,27 @@ class SlimClient:
             # handle incoming data from socket
             buffer = buffer + data
             del data
-            if len(buffer) > 8:
-                # construct operation and
+            bye = False
+            # a single read can hold several packets (and a partial one at the end)
+            while len(buffer) >= 8:
                 operation, length = buffer[:4], buffer[4:8]
                 plen = struct.unpack("!I", length)[0] + 8
-                if len(buffer) >= plen:
-                    packet, buffer = buffer[8:plen], buffer[plen:]
-                    operation = operation.strip(b"!").strip().decode().lower()
-                    if operation == "bye":
-                        break
-                    handler = getattr(self, f"_process_{operation}", None)
-                    if handler is None:
-                        self.logger.debug("No handler for %s", operation)
-                    elif inspect.iscoroutinefunction(handler):
-                        create_task(handler(packet))
-                    else:
-                        asyncio.get_running_loop().call_soon(handler, packet)
+                if len(buffer) < plen:
+                    break
+                packet, buffer = buffer[8:plen], buffer[plen:]
+                operation = operation.strip(b"!").strip().decode().lower()
+                if operation == "bye":
+                    bye = True
+                    break
+                handler = getattr(self, f"_process_{operation}", None)
+                if handler is None:
+                    self.logger.debug("No handler for %s", operation)
+                elif inspect.iscoroutinefunction(handler):
+                    create_task(handler(packet))
+                else:
+                    asyncio.get_running_loop().call_soon(handler, packet)
+            if bye:
+                break
         # EOF reached: socket is disconnected
         self._connected = False
         self.logger.debug(
@@ -722,6 +727,13 @@ class SlimClient:
         # power() and volume_set() skip unchanged values, but the player has none yet
         await self._send_power(self._powered)
         await self._send_gain()
+        if (
+            self._reader.at_eof()
+            or self._writer.is_closing()
+            or self._reader_task.done()
+        ):
+            # the player disconnected while we were setting it up
+            return
         self._connected = True
         self._heartbeat_task = asyncio.create_task(self._send_heartbeat())
         self.callback(self, EventType.PLAYER_CONNECTED)
@@ -825,7 +837,7 @@ class SlimClient:
         """Redirect incoming STAT event from player to correct method."""
         event = data[:4].decode()
         event_data = data[4:]
-        if event == b"\x00\x00\x00\x00":
+        if event == "\x00\x00\x00\x00":
             # Presumed informational stat message
             return
         event_handler = getattr(self, f"_process_stat_{event.lower()}", None)
