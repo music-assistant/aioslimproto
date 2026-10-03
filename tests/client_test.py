@@ -397,7 +397,11 @@ class TestRedirect:
     ) -> None:
         """The new stream keeps the details and start mode it was requested with."""
         media = MediaDetails(
-            url=_TRACK_URL, mime_type="audio/wav", metadata={"title": "Track"}
+            url=_TRACK_URL,
+            mime_type="audio/wav",
+            metadata={"title": "Track"},
+            stream_threshold=100,
+            output_threshold=5,
         )
         client._buffering_media = media  # noqa: SLF001
         client._auto_play = autostart  # noqa: SLF001
@@ -412,6 +416,8 @@ class TestRedirect:
             media.metadata,
             media.transition,
             media.transition_duration,
+            stream_threshold=media.stream_threshold,
+            output_threshold=media.output_threshold,
             autostart=autostart,
         )
 
@@ -543,3 +549,62 @@ class TestSetdPlayerName:
         client.callback.assert_called_with(
             client, EventType.PLAYER_NAME_RECEIVED, expected
         )
+        
+        
+class TestSocketReader:
+    """The socket reader handles every complete packet it has buffered."""
+
+    @staticmethod
+    async def _read(writer: Mock, data: bytes) -> list[bytes]:
+        """Feed data followed by EOF and return the DSCO payloads that were handled."""
+        reader = asyncio.StreamReader()
+        slim_client = SlimClient(reader, writer, Mock())
+        handled: list[bytes] = []
+        slim_client._process_dsco = handled.append  # noqa: SLF001
+        reader.feed_data(data)
+        reader.feed_eof()
+        await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
+        await asyncio.sleep(0)
+        return handled
+
+    @pytest.mark.asyncio
+    async def test_packets_from_one_read_are_all_handled_in_order(
+        self, writer: Mock
+    ) -> None:
+        """Several packets arriving together are all handled, in arrival order."""
+        payloads = [bytes([i]) for i in range(30)]
+
+        handled = await self._read(
+            writer, b"".join(_frame(b"DSCO", p) for p in payloads)
+        )
+
+        assert handled == payloads
+
+    @pytest.mark.asyncio
+    async def test_packet_without_payload_is_handled(self, writer: Mock) -> None:
+        """A packet that consists of only its header is handled too."""
+        handled = await self._read(writer, _frame(b"DSCO", b""))
+
+        assert handled == [b""]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bye", [_frame(b"BYE!", b""), None])
+    async def test_helo_followed_by_disconnect_does_not_connect(
+        self, writer: Mock, bye: bytes | None
+    ) -> None:
+        """A player that is gone right after hello is not reported connected."""
+        reader = asyncio.StreamReader()
+        callback = Mock()
+        slim_client = SlimClient(reader, writer, callback)
+        reader.feed_data(_frame(b"HELO", bytes([12, 0]) + bytes(6)))
+        if bye:
+            reader.feed_data(bye)
+        else:
+            reader.feed_eof()
+
+        await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert not slim_client.connected
+        assert call(slim_client, EventType.PLAYER_CONNECTED) not in callback.mock_calls
