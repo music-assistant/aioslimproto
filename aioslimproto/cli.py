@@ -461,6 +461,21 @@ class SlimProtoCLI:
             elif not clientid and channel == "/slim/unsubscribe":
                 # pull clientId out of unsubscribe
                 clientid = cometd_msg["data"]["unsubscribe"].split("/")[1]
+                if clientid not in self._cometd_clients:
+                    # The unsubscribe names a session the server already dropped, so there
+                    # is nothing to remove. Replying "invalid clientId" would make the
+                    # client handshake and resend the same stale unsubscribe, forever.
+                    response.append(
+                        {
+                            "id": cometd_msg.get("id", ""),
+                            "channel": channel,
+                            "clientId": clientid,
+                            "successful": True,
+                        },
+                    )
+                    # Other messages in this request belong to the client's new session.
+                    clientid = ""
+                    continue
             assert clientid, "No clientID provided"
             logger.debug(
                 "Incoming message for channel '%s' - clientid: %s",
@@ -681,6 +696,9 @@ class SlimProtoCLI:
                         "successful": True,
                     },
                 )
+        if not clientid:
+            # Only stale unsubscribes were sent, there is no session to drain
+            return web.json_response(response)
         # append any remaining messages from the queue
         while True:
             try:

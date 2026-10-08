@@ -704,3 +704,88 @@ class TestDisplayName:
         response = cli._handle_players(dummy_player.player_id)  # noqa: SLF001
 
         assert response["players_loop"][0]["name"] == "Renamed in app"
+
+
+class TestCometDStaleSession:
+    """Tests for requests that name a client session the server has already dropped."""
+
+    @staticmethod
+    async def _post(cli: SlimProtoCLI, messages: list[dict]) -> list[dict]:
+        request = Mock(json=AsyncMock(return_value=messages))
+        resp = await cli._handle_cometd_client(request)  # noqa: SLF001
+        return json.loads(resp.text)
+
+    @classmethod
+    async def _handshake(cls, cli: SlimProtoCLI) -> str:
+        return (await cls._post(cli, [{"channel": "/meta/handshake", "id": "1"}]))[0][
+            "clientId"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_for_dropped_session_succeeds(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A stale unsubscribe succeeds and does not take over the batch."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        # The server drops a session when its streaming connection ends or it goes idle.
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+        new_id = await self._handshake(cli)
+
+        # A reconnecting client unsubscribes the old session's channels and then
+        # subscribes on the new session in the same request.
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 7,
+                    "channel": "/slim/unsubscribe",
+                    "data": {"unsubscribe": f"/{old_id}/slim/menustatus/aa:bb"},
+                },
+                {
+                    "id": 8,
+                    "channel": "/slim/subscribe",
+                    "data": {
+                        "request": ["", ["serverstatus", 0, 50, "subscribe:60"]],
+                        "response": f"/{new_id}/slim/serverstatus",
+                    },
+                },
+            ],
+        )
+
+        assert response[0]["channel"] == "/slim/unsubscribe"
+        assert response[0]["successful"] is True
+        assert "advice" not in response[0]
+        # The subscribe was handled under the new session.
+        assert any(msg["channel"] == "/slim/subscribe" for msg in response)
+        assert (
+            f"/{new_id}/slim/serverstatus"
+            in cli._cometd_clients[new_id].slim_subscriptions  # noqa: SLF001
+        )
+
+    @pytest.mark.asyncio
+    async def test_other_requests_for_dropped_session_still_need_handshake(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """Only unsubscribe is forgiving; other channels still get invalid clientId."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 9,
+                    "channel": "/slim/subscribe",
+                    "data": {
+                        "request": ["", ["serverstatus", 0, 50, "subscribe:60"]],
+                        "response": f"/{old_id}/slim/serverstatus",
+                    },
+                }
+            ],
+        )
+
+        assert response[0]["successful"] is False
+        assert response[0]["error"] == "invalid clientId"
+        assert response[0]["advice"]["reconnect"] == "handshake"
