@@ -764,6 +764,36 @@ class TestCometDStaleSession:
         )
 
     @pytest.mark.asyncio
+    async def test_unsubscribe_alone_for_dropped_session_succeeds(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A request with only a stale unsubscribe gets its reply straight away."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+
+        # Nothing follows the unsubscribe, so no session is left to drain a queue from.
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 7,
+                    "channel": "/slim/unsubscribe",
+                    "data": {"unsubscribe": f"/{old_id}/slim/menustatus/aa:bb"},
+                }
+            ],
+        )
+
+        assert len(response) == 1
+        assert response[0]["id"] == 7
+        assert response[0]["channel"] == "/slim/unsubscribe"
+        assert response[0]["clientId"] == old_id
+        assert response[0]["successful"] is True
+        assert "advice" not in response[0]
+        # The dropped session was not brought back, and no other one was made.
+        assert not cli._cometd_clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
     async def test_other_requests_for_dropped_session_still_need_handshake(
         self, dummy_server: SlimServer
     ) -> None:
