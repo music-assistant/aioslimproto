@@ -303,9 +303,17 @@ class SlimClient:
         """Send play/unpause command to player."""
         if self._state != PlayerState.PAUSED:
             return
-        await self._send_strm(b"u", flags=0)
+        # the position counts on from here, not from the last report before the pause;
+        # set before the send so an STMr that arrives meanwhile is not taken for a
+        # resume the player made itself
+        self._last_timestamp = time.time()
         # some players do not update their state by event so we force it here
         self._state = PlayerState.PLAYING
+        try:
+            await self._send_strm(b"u", flags=0)
+        except BaseException:
+            self._state = PlayerState.PAUSED
+            raise
         self.signal_update()
 
     async def pause(self) -> None:
@@ -313,9 +321,16 @@ class SlimClient:
         if self._state not in (PlayerState.PLAYING, PlayerState.BUFFERING):
             return
         await self._send_strm(b"p")
+        self._hold_elapsed()
         # some players do not update their state by event so we force it here
         self._state = PlayerState.PAUSED
         self.signal_update()
+
+    def _hold_elapsed(self) -> None:
+        """Keep the position reached so far, as it stops advancing once not playing."""
+        if self._state == PlayerState.PLAYING:
+            self._elapsed_milliseconds = self.elapsed_milliseconds
+            self._last_timestamp = time.time()
 
     async def toggle_pause(self) -> None:
         """Toggle play/pause command."""
@@ -906,6 +921,7 @@ class SlimClient:
     async def _process_stat_stmp(self, data: bytes) -> None:
         """Process incoming stat STMp message: Pause confirmed."""
         self.logger.debug("STMp received - pause confirmed.")
+        self._hold_elapsed()
         self._state = PlayerState.PAUSED
         self.signal_update()
         await self._render_display()
@@ -913,6 +929,9 @@ class SlimClient:
     async def _process_stat_stmr(self, data: bytes) -> None:
         """Process incoming stat STMr message: Resume confirmed."""
         self.logger.debug("STMr received - resume confirmed.")
+        if self._state == PlayerState.PAUSED:
+            # resumed by the player itself, so the position counts on from now
+            self._last_timestamp = time.time()
         self._state = PlayerState.PLAYING
         self.signal_update()
         await self._render_display()
