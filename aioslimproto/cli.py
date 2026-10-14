@@ -461,6 +461,21 @@ class SlimProtoCLI:
             elif not clientid and channel == "/slim/unsubscribe":
                 # pull clientId out of unsubscribe
                 clientid = cometd_msg["data"]["unsubscribe"].split("/")[1]
+                if clientid not in self._cometd_clients:
+                    # The unsubscribe names a session the server already dropped, so there
+                    # is nothing to remove. Replying "invalid clientId" would make the
+                    # client handshake and resend the same stale unsubscribe, forever.
+                    response.append(
+                        {
+                            "id": cometd_msg.get("id", ""),
+                            "channel": channel,
+                            "clientId": clientid,
+                            "successful": True,
+                        },
+                    )
+                    # Other messages in this request belong to the client's new session.
+                    clientid = ""
+                    continue
             assert clientid, "No clientID provided"
             logger.debug(
                 "Incoming message for channel '%s' - clientid: %s",
@@ -681,6 +696,9 @@ class SlimProtoCLI:
                         "successful": True,
                     },
                 )
+        if not clientid:
+            # Only stale unsubscribes were sent, there is no session to drain
+            return web.json_response(response)
         # append any remaining messages from the queue
         while True:
             try:
@@ -945,14 +963,16 @@ class SlimProtoCLI:
                 },
                 "preset_loop": preset_loop,
                 "preset_data": preset_data,
-                "item_loop": [
-                    menu_item_from_media_details(
-                        item,
-                    )
-                    for item in (player.current_media, player.next_media)
-                    if item
-                ],
             }
+            # LMS only adds item_loop when the playlist has songs (statusQuery in
+            # Slim/Control/Queries.pm), and clients read item_loop[1] as soon as the
+            # key is there
+            if item_loop := [
+                menu_item_from_media_details(item)
+                for item in (player.current_media, player.next_media)
+                if item
+            ]:
+                result["item_loop"] = item_loop
         # additional details if contextmenu requested
         if bool(useContextMenu):
             result = {
@@ -1553,9 +1573,9 @@ def playlist_item_from_media_details(index: int, media: MediaDetails) -> Playlis
         "coverid": "-187651250107376",
         "duration": media.metadata.get("duration", ""),
         "type": media.metadata.get("type", ""),
-        "bitrate": "",
-        "samplerate": "",
-        "samplesize": "",
+        "bitrate": media.metadata.get("bitrate", ""),
+        "samplerate": media.metadata.get("samplerate", ""),
+        "samplesize": media.metadata.get("samplesize", ""),
     }
 
 

@@ -12,9 +12,13 @@ from urllib.parse import quote
 
 import pytest
 
-from aioslimproto.cli import CometDClient, SlimProtoCLI
+from aioslimproto.cli import (
+    CometDClient,
+    SlimProtoCLI,
+    playlist_item_from_media_details,
+)
 from aioslimproto.client import SlimClient
-from aioslimproto.models import PlayerState
+from aioslimproto.models import MediaDetails, PlayerState
 from aioslimproto.server import SlimServer
 
 
@@ -72,6 +76,7 @@ def dummy_player() -> SlimClient:
             device_address="127.0.0.1",
             current_media=None,
             next_media=None,
+            presets=[],
             elapsed_seconds=0,
             volume_level=50,
             volume_set=AsyncMock(),
@@ -307,6 +312,65 @@ class TestStatusCommand:
         )
 
         assert response == expected_response
+
+
+class TestStatusMenuItemLoop:
+    """Tests for the item_loop of a status command with menu:menu."""
+
+    @staticmethod
+    async def _menu_status(player: SlimClient, server: SlimServer) -> dict:
+        """Return the menu-mode status of the player."""
+        cli = SlimProtoCLI(server)
+        return cast(
+            "dict",
+            await cli._handle_status(  # noqa: SLF001 # Accessing a protected member for testing purposes
+                player.player_id, "-", 2, menu="menu"
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_omitted_when_nothing_is_loaded(
+        self, dummy_player: SlimClient, dummy_server: SlimServer
+    ) -> None:
+        """Clients read item_loop[1] when it exists, so an empty one is omitted."""
+        status = await self._menu_status(dummy_player, dummy_server)
+
+        assert "item_loop" not in status
+        assert status["count"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("current", "following", "expected"),
+        [
+            ("Song", None, ["Song"]),
+            ("Song", "Next", ["Song", "Next"]),
+            (None, "Next", ["Next"]),
+        ],
+    )
+    async def test_lists_the_current_and_next_track(
+        self,
+        dummy_player: SlimClient,
+        dummy_server: SlimServer,
+        current: str | None,
+        following: str | None,
+        expected: list[str],
+    ) -> None:
+        """The loaded track and the one queued after it are listed."""
+
+        def media(title: str | None) -> MediaDetails | None:
+            if title is None:
+                return None
+            return MediaDetails(
+                url="http://host/stream.flac",
+                metadata={"title": title},  # type: ignore[typeddict-item]
+            )
+
+        dummy_player.current_media = media(current)
+        dummy_player.next_media = media(following)
+
+        status = await self._menu_status(dummy_player, dummy_server)
+
+        assert [item["text"] for item in status["item_loop"]] == expected
 
 
 class TestMixerVolumeCommand:
@@ -704,6 +768,175 @@ class TestDisplayName:
         response = cli._handle_players(dummy_player.player_id)  # noqa: SLF001
 
         assert response["players_loop"][0]["name"] == "Renamed in app"
+
+
+class TestCometDStaleSession:
+    """Tests for requests that name a client session the server has already dropped."""
+
+    @staticmethod
+    async def _post(cli: SlimProtoCLI, messages: list[dict]) -> list[dict]:
+        request = Mock(json=AsyncMock(return_value=messages))
+        resp = await cli._handle_cometd_client(request)  # noqa: SLF001
+        return json.loads(resp.text)
+
+    @classmethod
+    async def _handshake(cls, cli: SlimProtoCLI) -> str:
+        return (await cls._post(cli, [{"channel": "/meta/handshake", "id": "1"}]))[0][
+            "clientId"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_for_dropped_session_succeeds(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A stale unsubscribe succeeds and does not take over the batch."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        # The server drops a session when its streaming connection ends or it goes idle.
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+        new_id = await self._handshake(cli)
+
+        # A reconnecting client unsubscribes the old session's channels and then
+        # subscribes on the new session in the same request.
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 7,
+                    "channel": "/slim/unsubscribe",
+                    "data": {"unsubscribe": f"/{old_id}/slim/menustatus/aa:bb"},
+                },
+                {
+                    "id": 8,
+                    "channel": "/slim/subscribe",
+                    "data": {
+                        "request": ["", ["serverstatus", 0, 50, "subscribe:60"]],
+                        "response": f"/{new_id}/slim/serverstatus",
+                    },
+                },
+            ],
+        )
+
+        assert response[0]["channel"] == "/slim/unsubscribe"
+        assert response[0]["successful"] is True
+        assert "advice" not in response[0]
+        # The subscribe was handled under the new session.
+        assert any(msg["channel"] == "/slim/subscribe" for msg in response)
+        assert (
+            f"/{new_id}/slim/serverstatus"
+            in cli._cometd_clients[new_id].slim_subscriptions  # noqa: SLF001
+        )
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_alone_for_dropped_session_succeeds(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A request with only a stale unsubscribe gets its reply straight away."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+
+        # Nothing follows the unsubscribe, so no session is left to drain a queue from.
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 7,
+                    "channel": "/slim/unsubscribe",
+                    "data": {"unsubscribe": f"/{old_id}/slim/menustatus/aa:bb"},
+                }
+            ],
+        )
+
+        assert len(response) == 1
+        assert response[0]["id"] == 7
+        assert response[0]["channel"] == "/slim/unsubscribe"
+        assert response[0]["clientId"] == old_id
+        assert response[0]["successful"] is True
+        assert "advice" not in response[0]
+        # The dropped session was not brought back, and no other one was made.
+        assert not cli._cometd_clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_other_requests_for_dropped_session_still_need_handshake(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """Only unsubscribe is forgiving; other channels still get invalid clientId."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 9,
+                    "channel": "/slim/subscribe",
+                    "data": {
+                        "request": ["", ["serverstatus", 0, 50, "subscribe:60"]],
+                        "response": f"/{old_id}/slim/serverstatus",
+                    },
+                }
+            ],
+        )
+
+        assert response[0]["successful"] is False
+        assert response[0]["error"] == "invalid clientId"
+        assert response[0]["advice"]["reconnect"] == "handshake"
+
+
+class TestPlaylistItem:
+    """Tests for the codec and quality fields of a playlist item."""
+
+    @staticmethod
+    def _media(**metadata: str) -> MediaDetails:
+        return MediaDetails(
+            url="http://host/stream.flac",
+            metadata=metadata,  # type: ignore[arg-type]
+        )
+
+    def test_takes_the_codec_and_quality_from_the_metadata(self) -> None:
+        """The type, bitrate, samplerate and samplesize come from the metadata."""
+        item = playlist_item_from_media_details(
+            0,
+            self._media(
+                type="flac",
+                bitrate="912kbps",
+                samplerate="44100",
+                samplesize="16",
+            ),
+        )
+
+        assert item["type"] == "flac"
+        assert item["bitrate"] == "912kbps"
+        assert item["samplerate"] == "44100"
+        assert item["samplesize"] == "16"
+
+    def test_defaults_to_empty_strings_without_the_metadata(self) -> None:
+        """Metadata that omits the fields gives empty strings, not missing keys."""
+        item = playlist_item_from_media_details(0, self._media())
+
+        assert item["type"] == ""
+        assert item["bitrate"] == ""
+        assert item["samplerate"] == ""
+        assert item["samplesize"] == ""
+
+    @pytest.mark.asyncio
+    async def test_status_playlist_loop_carries_the_fields(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """A loaded track's codec and quality reach the status playlist_loop."""
+        dummy_player.current_media = self._media(
+            type="flac", bitrate="912kbps", samplerate="44100", samplesize="16"
+        )
+        cli = SlimProtoCLI(dummy_server)
+
+        status = await cli._handle_status(  # noqa: SLF001
+            dummy_player.player_id, "-", 2
+        )
+
+        assert status["playlist_loop"][0]["type"] == "flac"
+        assert status["playlist_loop"][0]["bitrate"] == "912kbps"
 
 
 class TestPushPopups:

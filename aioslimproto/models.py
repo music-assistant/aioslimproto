@@ -236,6 +236,9 @@ class MediaMetadata(TypedDict):
     image_url: str  # optional
     duration: int  # optional
     type: str  # optional
+    bitrate: str  # optional
+    samplerate: str  # optional
+    samplesize: str  # optional
 
 
 @dataclass
