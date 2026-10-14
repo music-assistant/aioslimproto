@@ -303,9 +303,8 @@ class SlimClient:
         """Send play/unpause command to player."""
         if self._state != PlayerState.PAUSED:
             return
-        # the position counts on from here, not from the last report before the pause;
-        # set before the send so an STMr that arrives meanwhile is not taken for a
-        # resume the player made itself
+        # restart the clock before the send so an STMr arriving meanwhile
+        # is not taken for a resume the player made itself
         self._last_timestamp = time.time()
         # some players do not update their state by event so we force it here
         self._state = PlayerState.PLAYING
@@ -325,12 +324,6 @@ class SlimClient:
         # some players do not update their state by event so we force it here
         self._state = PlayerState.PAUSED
         self.signal_update()
-
-    def _hold_elapsed(self) -> None:
-        """Keep the position reached so far, as it stops advancing once not playing."""
-        if self._state == PlayerState.PLAYING:
-            self._elapsed_milliseconds = self.elapsed_milliseconds
-            self._last_timestamp = time.time()
 
     async def toggle_pause(self) -> None:
         """Toggle play/pause command."""
@@ -917,6 +910,12 @@ class SlimClient:
             asyncio.create_task(self.play())
         else:
             self.callback(self, EventType.PLAYER_OUTPUT_UNDERRUN)
+
+    def _hold_elapsed(self) -> None:
+        """Freeze the extrapolated position so it stays put while not playing."""
+        if self._state == PlayerState.PLAYING:
+            self._elapsed_milliseconds = self.elapsed_milliseconds
+            self._last_timestamp = time.time()
 
     async def _process_stat_stmp(self, data: bytes) -> None:
         """Process incoming stat STMp message: Pause confirmed."""
