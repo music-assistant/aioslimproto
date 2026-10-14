@@ -12,9 +12,9 @@ from urllib.parse import quote
 
 import pytest
 
-from aioslimproto.cli import SlimProtoCLI
+from aioslimproto.cli import SlimProtoCLI, playlist_item_from_media_details
 from aioslimproto.client import SlimClient
-from aioslimproto.models import PlayerState
+from aioslimproto.models import MediaDetails, PlayerState
 from aioslimproto.server import SlimServer
 
 
@@ -819,3 +819,57 @@ class TestCometDStaleSession:
         assert response[0]["successful"] is False
         assert response[0]["error"] == "invalid clientId"
         assert response[0]["advice"]["reconnect"] == "handshake"
+
+
+class TestPlaylistItem:
+    """Tests for the codec and quality fields of a playlist item."""
+
+    @staticmethod
+    def _media(**metadata: str) -> MediaDetails:
+        return MediaDetails(
+            url="http://host/stream.flac",
+            metadata=metadata,  # type: ignore[arg-type]
+        )
+
+    def test_takes_the_codec_and_quality_from_the_metadata(self) -> None:
+        """The type, bitrate, samplerate and samplesize come from the metadata."""
+        item = playlist_item_from_media_details(
+            0,
+            self._media(
+                type="flac",
+                bitrate="912kbps",
+                samplerate="44100",
+                samplesize="16",
+            ),
+        )
+
+        assert item["type"] == "flac"
+        assert item["bitrate"] == "912kbps"
+        assert item["samplerate"] == "44100"
+        assert item["samplesize"] == "16"
+
+    def test_defaults_to_empty_strings_without_the_metadata(self) -> None:
+        """Metadata that omits the fields gives empty strings, not missing keys."""
+        item = playlist_item_from_media_details(0, self._media())
+
+        assert item["type"] == ""
+        assert item["bitrate"] == ""
+        assert item["samplerate"] == ""
+        assert item["samplesize"] == ""
+
+    @pytest.mark.asyncio
+    async def test_status_playlist_loop_carries_the_fields(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """A loaded track's codec and quality reach the status playlist_loop."""
+        dummy_player.current_media = self._media(
+            type="flac", bitrate="912kbps", samplerate="44100", samplesize="16"
+        )
+        cli = SlimProtoCLI(dummy_server)
+
+        status = await cli._handle_status(  # noqa: SLF001
+            dummy_player.player_id, "-", 2
+        )
+
+        assert status["playlist_loop"][0]["type"] == "flac"
+        assert status["playlist_loop"][0]["bitrate"] == "912kbps"
