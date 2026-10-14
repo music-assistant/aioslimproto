@@ -2,6 +2,7 @@
 
 import asyncio
 import struct
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
@@ -583,3 +584,103 @@ class TestSocketReader:
 
         assert not slim_client.connected
         assert call(slim_client, EventType.PLAYER_CONNECTED) not in callback.mock_calls
+
+
+class TestPositionAcrossPauseAndResume:
+    """The position neither steps back at a pause nor jumps forward at a resume."""
+
+    @staticmethod
+    def _clock(monkeypatch: pytest.MonkeyPatch, now: float) -> list[float]:
+        clock = [now]
+        # only the client module sees the fake clock, not the rest of the process
+        monkeypatch.setattr(
+            "aioslimproto.client.time", SimpleNamespace(time=lambda: clock[0])
+        )
+        return clock
+
+    @staticmethod
+    def _playing(client: SlimClient, *, elapsed_ms: int, reported_at: float) -> None:
+        client._state = PlayerState.PLAYING  # noqa: SLF001
+        client._elapsed_milliseconds = elapsed_ms  # noqa: SLF001
+        client._last_timestamp = reported_at  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_pausing_keeps_the_position_reached_and_it_stays_put(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seven tenths of a second after the last report, the pause holds it."""
+        clock = self._clock(monkeypatch, 100.7)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        await live_client.pause()
+        assert live_client.state == PlayerState.PAUSED
+        assert live_client.elapsed_milliseconds == 10_700
+        clock[0] = 105.0
+        assert live_client.elapsed_milliseconds == 10_700
+
+    @pytest.mark.asyncio
+    async def test_resuming_counts_on_from_the_resume_not_from_before_the_pause(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a three second pause the position has not moved when play starts."""
+        clock = self._clock(monkeypatch, 103.0)
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        live_client._elapsed_milliseconds = 10_700  # noqa: SLF001
+        live_client._last_timestamp = 100.0  # noqa: SLF001
+        await live_client.play()
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.elapsed_milliseconds == 10_700
+        clock[0] = 104.0
+        assert live_client.elapsed_milliseconds == 11_700
+
+    @pytest.mark.asyncio
+    async def test_a_pause_made_on_the_player_holds_the_position_too(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pause the player started itself holds the position as well."""
+        clock = self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        await live_client._process_stat_stmp(b"")  # noqa: SLF001
+        clock[0] = 108.0
+        assert live_client.state == PlayerState.PAUSED
+        assert live_client.elapsed_milliseconds == 10_400
+
+    @pytest.mark.asyncio
+    async def test_a_resume_made_on_the_player_restarts_the_clock(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the player resumed by itself, the position counts on from there."""
+        clock = self._clock(monkeypatch, 109.0)
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        live_client._elapsed_milliseconds = 10_400  # noqa: SLF001
+        live_client._last_timestamp = 100.0  # noqa: SLF001
+        await live_client._process_stat_stmr(b"")  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.elapsed_milliseconds == 10_400
+        clock[0] = 110.0
+        assert live_client.elapsed_milliseconds == 11_400
+
+    @pytest.mark.asyncio
+    async def test_the_confirmation_of_our_own_resume_does_not_move_the_clock(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """play() already restarted the clock, so the confirmation leaves it alone."""
+        clock = self._clock(monkeypatch, 103.0)
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        live_client._elapsed_milliseconds = 10_700  # noqa: SLF001
+        live_client._last_timestamp = 100.0  # noqa: SLF001
+        await live_client.play()
+        clock[0] = 103.5
+        await live_client._process_stat_stmr(b"")  # noqa: SLF001
+        assert live_client.elapsed_milliseconds == 11_200
+
+    @pytest.mark.asyncio
+    async def test_pausing_while_buffering_leaves_the_reported_position_alone(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is extrapolated while buffering, so there is nothing to hold."""
+        self._clock(monkeypatch, 100.7)
+        live_client._state = PlayerState.BUFFERING  # noqa: SLF001
+        live_client._elapsed_milliseconds = 4_000  # noqa: SLF001
+        await live_client.pause()
+        assert live_client.state == PlayerState.PAUSED
+        assert live_client.elapsed_milliseconds == 4_000
