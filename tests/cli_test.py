@@ -14,7 +14,7 @@ import pytest
 
 from aioslimproto.cli import SlimProtoCLI
 from aioslimproto.client import SlimClient
-from aioslimproto.models import PlayerState
+from aioslimproto.models import MediaDetails, PlayerState
 from aioslimproto.server import SlimServer
 
 
@@ -72,6 +72,7 @@ def dummy_player() -> SlimClient:
             device_address="127.0.0.1",
             current_media=None,
             next_media=None,
+            presets=[],
             elapsed_seconds=0,
             volume_level=50,
             volume_set=AsyncMock(),
@@ -307,6 +308,65 @@ class TestStatusCommand:
         )
 
         assert response == expected_response
+
+
+class TestStatusMenuItemLoop:
+    """Tests for the item_loop of a status command with menu:menu."""
+
+    @staticmethod
+    async def _menu_status(player: SlimClient, server: SlimServer) -> dict:
+        """Return the menu-mode status of the player."""
+        cli = SlimProtoCLI(server)
+        return cast(
+            "dict",
+            await cli._handle_status(  # noqa: SLF001 # Accessing a protected member for testing purposes
+                player.player_id, "-", 2, menu="menu"
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_omitted_when_nothing_is_loaded(
+        self, dummy_player: SlimClient, dummy_server: SlimServer
+    ) -> None:
+        """Clients read item_loop[1] when it exists, so an empty one is omitted."""
+        status = await self._menu_status(dummy_player, dummy_server)
+
+        assert "item_loop" not in status
+        assert status["count"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("current", "following", "expected"),
+        [
+            ("Song", None, ["Song"]),
+            ("Song", "Next", ["Song", "Next"]),
+            (None, "Next", ["Next"]),
+        ],
+    )
+    async def test_lists_the_current_and_next_track(
+        self,
+        dummy_player: SlimClient,
+        dummy_server: SlimServer,
+        current: str | None,
+        following: str | None,
+        expected: list[str],
+    ) -> None:
+        """The loaded track and the one queued after it are listed."""
+
+        def media(title: str | None) -> MediaDetails | None:
+            if title is None:
+                return None
+            return MediaDetails(
+                url="http://host/stream.flac",
+                metadata={"title": title},  # type: ignore[typeddict-item]
+            )
+
+        dummy_player.current_media = media(current)
+        dummy_player.next_media = media(following)
+
+        status = await self._menu_status(dummy_player, dummy_server)
+
+        assert [item["text"] for item in status["item_loop"]] == expected
 
 
 class TestMixerVolumeCommand:
