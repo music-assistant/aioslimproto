@@ -156,6 +156,9 @@ class SlimProtoCLI:
     _periodic_task: asyncio.Task | None = None
     _cli_server: asyncio.Server | None = None
     command_handler: SlimCLICommandHandler | None = None
+    # Optional hook returning the name to report for a player_id, or None to use
+    # the device-reported player.name. Set by the consuming application.
+    display_name_lookup: Callable[[str], str | None] | None = None
 
     def __init__(
         self,
@@ -821,6 +824,14 @@ class SlimProtoCLI:
         # individual values are returned with underscore ?!
         return {f"_{command}": cmd_result}
 
+    def _display_name(self, player: SlimClient) -> str:
+        """Return the name to report for a player, preferring display_name_lookup."""
+        if self.display_name_lookup is not None:
+            name = self.display_name_lookup(player.player_id)
+            if name:
+                return name
+        return player.name
+
     def _handle_players(
         self,
         player_id: str,
@@ -838,7 +849,9 @@ class SlimProtoCLI:
                 continue
             if len(players) >= limit:
                 break
-            players.append(create_player_item(index, player))
+            item = create_player_item(index, player)
+            item["name"] = self._display_name(player)
+            players.append(item)
         return PlayersResponse(count=len(players), players_loop=players)
 
     async def _handle_status(
@@ -862,7 +875,7 @@ class SlimProtoCLI:
             playlist_items.append(player.next_media)
         # base details
         result = {
-            "player_name": player.name,
+            "player_name": self._display_name(player),
             "player_connected": int(player.connected),
             "player_needs_upgrade": 0,
             "player_is_upgrading": 0,
@@ -968,7 +981,9 @@ class SlimProtoCLI:
                 continue
             if len(players) > limit:
                 break
-            players.append(create_player_item(start_index + index, player))
+            item = create_player_item(start_index + index, player)
+            item["name"] = self._display_name(player)
+            players.append(item)
         return ServerStatusResponse(
             {
                 "httpport": self.cli_port_json,
