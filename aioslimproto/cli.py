@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import inspect
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 import urllib.parse
 from uuid import uuid1
 
@@ -1360,6 +1360,66 @@ class SlimProtoCLI:
                         "ext": {"priority": sub["data"].get("priority")},
                     },
                 )
+
+    def push_show_briefly(
+        self,
+        player_id: str,
+        text: list[str],
+        style: str | None = None,
+        icon_id: str | None = None,
+        duration_ms: int = 3000,
+        kind: Literal["mixed", "song"] = "mixed",
+    ) -> None:
+        """Push a "showBriefly" popup to a player's displaystatus subscription."""
+        # kind "mixed" is the "Adding ..." confirmation (text[0] label, text[1] title,
+        # with style and icon_id); "song" is "Now Playing" plus the title.
+        display: dict[str, Any] = {"type": kind, "text": text, "duration": duration_ms}
+        if style:
+            display["style"] = style
+        if icon_id:
+            display["icon-id"] = icon_id
+        self._push_displaystatus(player_id, display)
+
+    def push_play_icon(
+        self,
+        player_id: str,
+        text: list[str],
+        icon_id: str | None = None,
+    ) -> None:
+        """Push the icon-only "play" popup LMS sends when a track loads."""
+        # text is required even though it is never shown: the client formats it before
+        # it checks the popup type, and a missing one aborts the whole callback.
+        display: dict[str, Any] = {
+            "type": "icon",
+            "style": "play",
+            "play-mode": "play",
+            "is-remote": 0,
+            "text": text,
+        }
+        if icon_id:
+            display["icon-id"] = icon_id
+        self._push_displaystatus(player_id, display)
+
+    def _push_displaystatus(self, player_id: str, display: dict[str, Any]) -> None:
+        """Queue a displaystatus payload for a player's subscription, if it has one."""
+        # a reconnected client can leave an older session listed, so use the session
+        # that holds the subscription, not just the first one for the player
+        for client in self._cometd_clients.values():
+            sub = client.slim_subscriptions.get(
+                f"/{client.client_id}/slim/displaystatus/{player_id}",
+            )
+            if client.player_id != player_id or not sub:
+                continue
+            with suppress(asyncio.QueueFull):
+                client.queue.put_nowait(
+                    {
+                        "channel": sub["data"]["response"],
+                        "id": sub["id"],
+                        "data": {"display": display},
+                        "ext": {"priority": sub["data"].get("priority")},
+                    },
+                )
+            return
 
     async def _do_periodic(self) -> None:
         """Execute periodic sending of state and cleanup."""

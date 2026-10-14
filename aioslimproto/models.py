@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 
 class EventType(Enum):
@@ -296,6 +296,7 @@ class CometDResponse(TypedDict):
     channel: str
     id: str
     data: dict[str, Any]
+    ext: NotRequired[dict[str, Any]]
 
 
 class SlimSubscribeData(CometDResponse):

@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import pytest
 
-from aioslimproto.cli import SlimProtoCLI
+from aioslimproto.cli import CometDClient, SlimProtoCLI
 from aioslimproto.client import SlimClient
 from aioslimproto.models import PlayerState
 from aioslimproto.server import SlimServer
@@ -704,3 +704,107 @@ class TestDisplayName:
         response = cli._handle_players(dummy_player.player_id)  # noqa: SLF001
 
         assert response["players_loop"][0]["name"] == "Renamed in app"
+
+
+class TestPushPopups:
+    """The popups pushed to a device's displaystatus subscription."""
+
+    @staticmethod
+    def _cli_with_subscription(
+        dummy_server: SlimServer, *, subscribed: bool = True
+    ) -> tuple[SlimProtoCLI, CometDClient]:
+        cli = SlimProtoCLI(dummy_server)
+        client = CometDClient(client_id="c1", player_id="a5:41:d2:cd:cd:05")
+        if subscribed:
+            client.slim_subscriptions["/c1/slim/displaystatus/a5:41:d2:cd:cd:05"] = {
+                "id": 11,
+                "data": {"response": "/c1/slim/displaystatus/a5:41:d2:cd:cd:05"},
+            }  # type: ignore[assignment]
+        cli._cometd_clients["c1"] = client  # noqa: SLF001
+        return cli, client
+
+    def test_a_mixed_popup_carries_the_text_style_and_icon(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """The confirmation popup has the label, the title, a badge and cover art."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        cli.push_show_briefly(
+            "a5:41:d2:cd:cd:05",
+            ["Adding", "A Song"],
+            style="add",
+            icon_id="42",
+            duration_ms=2500,
+        )
+        message = client.queue.get_nowait()
+        assert message["channel"] == "/c1/slim/displaystatus/a5:41:d2:cd:cd:05"
+        assert message["id"] == 11
+        assert message["data"]["display"] == {
+            "type": "mixed",
+            "text": ["Adding", "A Song"],
+            "duration": 2500,
+            "style": "add",
+            "icon-id": "42",
+        }
+
+    def test_the_optional_parts_are_left_out_when_not_given(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """No style and no icon id mean neither key is sent."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        cli.push_show_briefly(
+            "a5:41:d2:cd:cd:05", ["Now Playing", "A Song"], kind="song"
+        )
+        display = client.queue.get_nowait()["data"]["display"]
+        assert display["type"] == "song"
+        assert "style" not in display
+        assert "icon-id" not in display
+
+    def test_the_play_icon_popup_always_has_text(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """The client fails on a missing text even though it never shows it."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        cli.push_play_icon("a5:41:d2:cd:cd:05", ["A Song"], icon_id="42")
+        display = client.queue.get_nowait()["data"]["display"]
+        assert display == {
+            "type": "icon",
+            "style": "play",
+            "play-mode": "play",
+            "is-remote": 0,
+            "text": ["A Song"],
+            "icon-id": "42",
+        }
+
+    def test_nothing_is_queued_without_a_session_or_a_subscription(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A device that is not listening for popups is not an error."""
+        cli, client = self._cli_with_subscription(dummy_server, subscribed=False)
+        cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
+        assert client.queue.empty()
+        cli.push_show_briefly("someone-else", ["Adding", "A Song"])
+        assert client.queue.empty()
+
+    def test_a_session_with_the_subscription_gets_the_popup_not_an_older_one(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A reconnect can leave an older session listed first for the same player."""
+        cli, newer = self._cli_with_subscription(dummy_server)
+        older = CometDClient(client_id="c0", player_id="a5:41:d2:cd:cd:05")
+        cli._cometd_clients = {"c0": older, **cli._cometd_clients}  # noqa: SLF001
+        cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
+        assert older.queue.empty()
+        assert newer.queue.get_nowait()["data"]["display"]["text"] == [
+            "Adding",
+            "A Song",
+        ]
+
+    def test_a_full_queue_drops_the_popup_without_failing(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """The popup is a courtesy, so a backlog on the connection never raises."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        for _ in range(client.queue.maxsize):
+            client.queue.put_nowait({"channel": "x", "id": 0, "data": {}})  # type: ignore[typeddict-item]
+        cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
+        assert client.queue.full()
