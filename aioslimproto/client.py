@@ -1105,9 +1105,7 @@ class SlimClient:
         self.logger.debug("SETD received - %s", data)
         data_id = data[0]
         if data_id == 0:
-            # received player name: squeezelite and SqueezeESP32 terminate it with a
-            # NUL byte, SqueezePlay (Radio/Touch/Controller) does not. Like LMS
-            # (unpack 'Z*'), take everything up to the first NUL, or to the end.
+            # received player name, NUL terminated except on SqueezePlay (Radio/Touch)
             self._device_name = (
                 data[1:].split(b"\x00", 1)[0].decode("utf-8", errors="replace")
             )
