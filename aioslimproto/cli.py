@@ -1494,9 +1494,9 @@ def playlist_item_from_media_details(index: int, media: MediaDetails) -> Playlis
         "coverid": "-187651250107376",
         "duration": media.metadata.get("duration", ""),
         "type": media.metadata.get("type", ""),
-        "bitrate": "",
-        "samplerate": "",
-        "samplesize": "",
+        "bitrate": media.metadata.get("bitrate", ""),
+        "samplerate": media.metadata.get("samplerate", ""),
+        "samplesize": media.metadata.get("samplesize", ""),
     }
 
 
