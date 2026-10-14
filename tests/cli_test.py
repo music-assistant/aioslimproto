@@ -663,3 +663,44 @@ class TestCometDLongPollWait:
         assert elapsed < self._MAX_ACCEPTABLE_SECONDS, (
             f"took {elapsed:.1f}s - hit the 30s long-poll wait."
         )
+
+
+class TestDisplayName:
+    """Tests for the display_name_lookup hook used for player names."""
+
+    def test_uses_lookup_when_it_returns_a_name(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """A name from the lookup overrides the device-reported name."""
+        cli = SlimProtoCLI(dummy_server)
+        cli.display_name_lookup = lambda _player_id: "Renamed in app"
+
+        assert cli._display_name(dummy_player) == "Renamed in app"  # noqa: SLF001
+
+    def test_falls_back_when_lookup_returns_none(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Falls back to the device-reported name when the lookup has no answer."""
+        cli = SlimProtoCLI(dummy_server)
+        cli.display_name_lookup = lambda _player_id: None
+
+        assert cli._display_name(dummy_player) == dummy_player.name  # noqa: SLF001
+
+    def test_falls_back_without_lookup(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """With no lookup set, the device-reported name is used."""
+        cli = SlimProtoCLI(dummy_server)
+
+        assert cli._display_name(dummy_player) == dummy_player.name  # noqa: SLF001
+
+    def test_players_list_uses_lookup(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """The players list reports the looked-up name."""
+        cli = SlimProtoCLI(dummy_server)
+        cli.display_name_lookup = lambda _player_id: "Renamed in app"
+
+        response = cli._handle_players(dummy_player.player_id)  # noqa: SLF001
+
+        assert response["players_loop"][0]["name"] == "Renamed in app"
