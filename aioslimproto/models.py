@@ -235,6 +235,7 @@ class MediaMetadata(TypedDict):
     title: str  # optional
     image_url: str  # optional
     duration: int  # optional
+    type: str  # optional
 
 
 @dataclass
@@ -353,6 +354,7 @@ PlaylistItem = TypedDict(
         "remote": int,
         "remote_title": str,
         "artwork_url": str,
+        "type": str,
         "bitrate": str,
         "samplerate": str,
         "samplesize": str,

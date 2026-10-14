@@ -1493,6 +1493,7 @@ def playlist_item_from_media_details(index: int, media: MediaDetails) -> Playlis
         "artwork_url": media.metadata.get("image_url", ""),
         "coverid": "-187651250107376",
         "duration": media.metadata.get("duration", ""),
+        "type": media.metadata.get("type", ""),
         "bitrate": "",
         "samplerate": "",
         "samplesize": "",
