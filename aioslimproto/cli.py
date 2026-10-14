@@ -945,14 +945,16 @@ class SlimProtoCLI:
                 },
                 "preset_loop": preset_loop,
                 "preset_data": preset_data,
-                "item_loop": [
-                    menu_item_from_media_details(
-                        item,
-                    )
-                    for item in (player.current_media, player.next_media)
-                    if item
-                ],
             }
+            # LMS only adds item_loop when the playlist has songs (statusQuery in
+            # Slim/Control/Queries.pm), and clients read item_loop[1] as soon as the
+            # key is there
+            if item_loop := [
+                menu_item_from_media_details(item)
+                for item in (player.current_media, player.next_media)
+                if item
+            ]:
+                result["item_loop"] = item_loop
         # additional details if contextmenu requested
         if bool(useContextMenu):
             result = {
