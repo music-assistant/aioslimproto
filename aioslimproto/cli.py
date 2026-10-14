@@ -1419,7 +1419,6 @@ class SlimProtoCLI:
                         "ext": {"priority": sub["data"].get("priority")},
                     },
                 )
-            return
 
     async def _do_periodic(self) -> None:
         """Execute periodic sending of state and cleanup."""
