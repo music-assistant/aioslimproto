@@ -899,10 +899,12 @@ class SlimProtoCLI:
             "player_is_upgrading": 0,
             "power": int(player.powered),
             "signalstrength": 0,
-            # "waitingToPlay" is left out, not sent as 0: LMS only adds it (as 1) while
-            # buffering. The client does `waitingToPlay or false` and Lua treats 0 as
-            # true, so sending 0 made it think the track never started playing and
-            # froze the elapsed/remaining time display.
+            # Only send waitingToPlay during buffering (as 1: the client treats 0 as true)
+            **(
+                {"waitingToPlay": 1}
+                if player.state in (PlayerState.BUFFERING, PlayerState.BUFFER_READY)
+                else {}
+            ),
         }
         cur_item = playlist_items[0] if playlist_items else None
         # Like LMS's statusQuery, nothing here is gated on the power state: power is just

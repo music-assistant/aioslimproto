@@ -1063,10 +1063,34 @@ class TestStatusShape:
         )
 
     @pytest.mark.asyncio
-    async def test_waiting_to_play_is_never_sent_as_zero(
-        self, dummy_server: SlimServer, dummy_player: SlimClient
+    @pytest.mark.parametrize("state", [PlayerState.BUFFERING, PlayerState.BUFFER_READY])
+    async def test_waiting_to_play_is_sent_while_buffering(
+        self,
+        dummy_server: SlimServer,
+        dummy_player: SlimClient,
+        state: PlayerState,
     ) -> None:
-        """The client treats a sent 0 as true, so the key is left out."""
+        """The position stands still while buffering, so the client must wait."""
+        dummy_player.state = state
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["mode"] == "play"
+        assert status["waitingToPlay"] == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "state", [PlayerState.PLAYING, PlayerState.PAUSED, PlayerState.STOPPED]
+    )
+    async def test_waiting_to_play_is_left_out_otherwise(
+        self,
+        dummy_server: SlimServer,
+        dummy_player: SlimClient,
+        state: PlayerState,
+    ) -> None:
+        """The client treats a sent 0 as true, so the key is left out otherwise."""
+        dummy_player.state = state
+
         status = await self._status(dummy_server, dummy_player)
 
         assert "waitingToPlay" not in status
