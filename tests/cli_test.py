@@ -10,6 +10,8 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import quote
 
+import aiohttp
+from aiohttp import web
 import pytest
 
 from aioslimproto.cli import (
@@ -1041,3 +1043,94 @@ class TestPushPopups:
             client.queue.put_nowait({"channel": "x", "id": 0, "data": {}})  # type: ignore[typeddict-item]
         cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
         assert client.queue.full()
+
+
+class TestExtraRoutes:
+    """Routes the consuming application adds to the CLI's own web server."""
+
+    @staticmethod
+    async def _started(routes: dict) -> SlimServer:
+        """Start a server whose CLI web server (only) runs on a free port."""
+        server = SlimServer(
+            ip_address="127.0.0.1",
+            name="test",
+            cli_port=None,
+            cli_port_json=0,
+            extra_routes=routes,
+        )
+        await server.cli.start()
+        return server
+
+    async def test_a_route_of_the_application_is_served(self) -> None:
+        """A request to the route reaches the handler, for any HTTP method."""
+
+        async def cover(request: web.Request) -> web.Response:
+            return web.Response(
+                text=f"{request.method} cover {request.match_info['id']}"
+            )
+
+        server = await self._started({"/music/{id}/cover": cover})
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{base}/music/7/cover") as response:
+                    assert (response.status, await response.text()) == (
+                        200,
+                        "GET cover 7",
+                    )
+                async with session.post(f"{base}/music/8/cover") as response:
+                    assert (response.status, await response.text()) == (
+                        200,
+                        "POST cover 8",
+                    )
+        finally:
+            await server.cli.stop()
+
+    async def test_the_routes_are_matched_in_the_order_given(self) -> None:
+        """Of two paths with variables that both match, the one listed first answers."""
+
+        async def numbers(_request: web.Request) -> web.Response:
+            return web.Response(text="numbers")
+
+        async def catch_all(_request: web.Request) -> web.Response:
+            return web.Response(text="catch-all")
+
+        server = await self._started(
+            {r"/files/{number:\d+}": numbers, "/files/{tail:.*}": catch_all}
+        )
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{base}/files/12") as response:
+                    assert await response.text() == "numbers"
+                async with session.get(f"{base}/files/other") as response:
+                    assert await response.text() == "catch-all"
+        finally:
+            await server.cli.stop()
+
+    async def test_the_built_in_routes_still_work(self) -> None:
+        """Adding routes leaves /jsonrpc.js and /cometd alone."""
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="extra")
+
+        server = await self._started({"/extra": handler})
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            request = {
+                "id": 1,
+                "method": "slim.request",
+                "params": ["-", ["players", 0, 9]],
+            }
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(f"{base}/jsonrpc.js", json=request) as response,
+            ):
+                assert response.status == 200
+                assert (await response.json())["result"]["count"] == 0
+        finally:
+            await server.cli.stop()
+
+    def test_without_routes_there_are_none(self, dummy_server: SlimServer) -> None:
+        """The default is no extra routes."""
+        assert SlimProtoCLI(dummy_server).extra_routes == {}
