@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import inspect
 import json
 import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 import urllib.parse
 from uuid import uuid1
 
@@ -899,30 +899,45 @@ class SlimProtoCLI:
             "player_is_upgrading": 0,
             "power": int(player.powered),
             "signalstrength": 0,
-            "waitingToPlay": 0,
+            # Only send waitingToPlay during buffering (as 1: the client treats 0 as true)
+            **(
+                {"waitingToPlay": 1}
+                if player.state in (PlayerState.BUFFERING, PlayerState.BUFFER_READY)
+                else {}
+            ),
         }
         cur_item = playlist_items[0] if playlist_items else None
-        # additional details if player powered
-        if player.powered:
-            result = {
-                **result,
-                "mode": PLAYMODE_MAP[player.state],
-                "remote": 1,
-                "current_title": self.server.name,
-                "time": int(player.elapsed_seconds),
-                "duration": cur_item.metadata.get("duration", 0) if cur_item else 0,
-                "sync_master": "",
-                "sync_slaves": "",
-                "mixer volume": player.volume_level,
-                "player_ip": player.device_address,
-                "playlist_cur_index": 0,
-                "playlist_tracks": len(playlist_items),
-                "playlist_loop": [
+        # Like LMS's statusQuery, nothing here is gated on the power state: power is just
+        # another reported field. mode and playlist_tracks are always sent, and the
+        # song-related fields depend on whether a song is loaded. Gating on power hid the
+        # whole queue from the client's playlist screen after a server boot.
+        result = {
+            **result,
+            "mode": PLAYMODE_MAP[player.state],
+            **(
+                {
+                    "remote": 1,
+                    "current_title": self.server.name,
+                    "time": int(player.elapsed_seconds),
+                    "duration": cur_item.metadata.get("duration", 0),
+                }
+                if cur_item
+                else {}
+            ),
+            "sync_master": "",
+            "sync_slaves": "",
+            "mixer volume": player.volume_level,
+            "player_ip": player.device_address,
+            **({"playlist_cur_index": 0} if playlist_items else {}),
+            "playlist_tracks": len(playlist_items),
+            "playlist_loop": [
+                _drop_empty_quality_fields(
                     playlist_item_from_media_details(index, item)
-                    for index, item in enumerate(playlist_items)
-                ],
-                **player.extra_data,
-            }
+                )
+                for index, item in enumerate(playlist_items)
+            ],
+            **player.extra_data,
+        }
 
         # additional details if menu requested
         if menu == "menu":
@@ -1577,6 +1592,24 @@ def playlist_item_from_media_details(index: int, media: MediaDetails) -> Playlis
         "samplerate": media.metadata.get("samplerate", ""),
         "samplesize": media.metadata.get("samplesize", ""),
     }
+
+
+def _drop_empty_quality_fields(item: PlaylistItem) -> PlaylistItem:
+    """Drop empty type/bitrate/samplerate/samplesize keys before they hit the wire.
+
+    Lua treats "" as true, so a client check like "if item.samplesize then" still
+    passes on an empty string and shows a stray "Hz • bits". Applied only where the
+    "status" response is assembled, not in playlist_item_from_media_details(): that is
+    a public function whose PlaylistItem type declares these keys as required.
+    """
+    return cast(
+        "PlaylistItem",
+        {
+            k: v
+            for k, v in item.items()
+            if k not in ("type", "bitrate", "samplerate", "samplesize") or v
+        },
+    )
 
 
 def create_player_item(playerindex: int, player: SlimClient) -> PlayerItem:
