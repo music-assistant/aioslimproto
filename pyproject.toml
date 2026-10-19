@@ -96,6 +96,7 @@ ignore = [
   "ANN003", # Just annoying, not really useful
   "ANN401", # Opinioated warning on disallowing dynamically typed expressions
   "COM812", # May conflict with formatter
+  "CPY001", # No copyright headers in this project
   "D203", # Conflicts with other rules
   "D213", # Conflicts with other rules
   "D417", # False positives in some occasions
