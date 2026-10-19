@@ -670,7 +670,7 @@ class SlimClient:
         self.callback(self, EventType.PLAYER_DISCONNECTED)
         self.disconnect()
 
-    async def _send_strm(  # noqa: PLR0913
+    async def _send_strm(  # noqa: PLR0913, PLR0917
         self,
         command: bytes = b"q",
         autostart: bytes = b"0",

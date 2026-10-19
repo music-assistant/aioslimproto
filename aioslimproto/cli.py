@@ -315,7 +315,7 @@ class SlimProtoCLI:
                 await writer.drain()
         except ConnectionResetError:
             pass
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             self.logger.debug("Error handling CLI command", exc_info=err)
         finally:
             self.logger.debug("Client disconnected from Telnet CLI")
@@ -799,7 +799,7 @@ class SlimProtoCLI:
                     )
             except asyncio.CancelledError:
                 pass  # Task was cancelled, clean exit
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 self.logger.debug(
                     "Error handling CometD request: %s",
                     err,
