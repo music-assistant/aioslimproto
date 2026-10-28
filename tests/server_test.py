@@ -1,5 +1,6 @@
 """Tests for SlimServer's player registration."""
 
+import asyncio
 from unittest.mock import Mock, patch
 
 import pytest
@@ -21,9 +22,11 @@ async def test_unregistered_socket_disconnect_keeps_registered_player() -> None:
     client_callback = slim_client_cls.call_args.args[2]
     registered = Mock(player_id=_PLAYER_ID, connected=True)
     client_callback(registered, EventType.PLAYER_CONNECTED)
+    await asyncio.sleep(0)
     events.clear()
 
     client_callback(Mock(player_id=_PLAYER_ID), EventType.PLAYER_DISCONNECTED)
+    await asyncio.sleep(0)
 
     assert server.get_player(_PLAYER_ID) is registered
     assert events == []
