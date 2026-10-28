@@ -175,10 +175,10 @@ class SlimServer:
             player_id = client.player_id
 
             if event_type == EventType.PLAYER_DISCONNECTED:
-                prev = self._players.pop(player_id, None)
-                if prev is None:
-                    # already cleaned up ?
+                # a socket that never got registered must not drop the one that did
+                if self._players.get(player_id) is not client:
                     return
+                del self._players[player_id]
 
             if event_type == EventType.PLAYER_CONNECTED:
                 if (existing := self._players.get(player_id)) and existing.connected:

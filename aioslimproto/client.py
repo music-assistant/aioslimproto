@@ -560,16 +560,14 @@ class SlimClient:
 
     async def send_frame(self, command: bytes, data: bytes) -> None:
         """Send (raw) command to Squeeze player."""
+        # the reader signals a lost connection; disconnect() here would cancel it first
         if self._reader.at_eof() or self._writer.is_closing():
             self.logger.debug("Socket is disconnected.")
-            self.disconnect()
             return
         packet = struct.pack("!H", len(data) + 4) + command + data
-        try:
+        with suppress(ConnectionError):
             self._writer.write(packet)
             await self._writer.drain()
-        except ConnectionResetError:
-            self.disconnect()
 
     async def _render_display(self, action: str | None = None) -> None:
         """Set display based on the current state."""
@@ -635,7 +633,7 @@ class SlimClient:
             try:
                 async with timeout(HEARTBEAT_INTERVAL * 2):
                     data = await self._reader.read(64)
-            except (TimeoutError, ConnectionResetError):
+            except (TimeoutError, ConnectionError):
                 break
             # handle incoming data from socket
             buffer = buffer + data
@@ -668,7 +666,7 @@ class SlimClient:
             self._writer.get_extra_info("peername"),
         )
         self.callback(self, EventType.PLAYER_DISCONNECTED)
-        self.disconnect()
+        self._writer.close()
 
     async def _send_strm(  # noqa: PLR0913, PLR0917
         self,

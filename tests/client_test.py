@@ -490,6 +490,38 @@ class TestByeCommand:
         assert slim_client.connected is False
 
 
+class TestSendToLostConnection:
+    """A send that finds the socket gone must still report the disconnect."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lost", ["eof", "closing", "fails_on_drain"])
+    async def test_send_before_reader_notices_signals_disconnect(
+        self, writer: Mock, lost: str
+    ) -> None:
+        """The player is reported disconnected when a send sees the loss first."""
+        reader = asyncio.StreamReader()
+        callback = Mock()
+        slim_client = SlimClient(reader, writer, callback)
+        slim_client._connected = True  # noqa: SLF001
+        # the transport hands the loss to the reader before the reader task runs;
+        # a failed write reaches it as a broken pipe
+        if lost == "eof":
+            reader.feed_eof()
+        else:
+            reader.set_exception(BrokenPipeError())
+        if lost == "closing":
+            writer.is_closing.return_value = True
+        if lost == "fails_on_drain":
+            writer.drain.side_effect = BrokenPipeError()
+
+        await slim_client.send_frame(b"vers", b"7.9")
+        await asyncio.wait([slim_client._reader_task], timeout=1)  # noqa: SLF001
+
+        assert slim_client.connected is False
+        assert call(slim_client, EventType.PLAYER_DISCONNECTED) in callback.mock_calls
+        writer.close.assert_called()
+
+
 class TestRestoreOnHelo:
     """A connecting player gets its volume and power state, even when unchanged."""
 
