@@ -9,7 +9,7 @@ import logging
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
-from .cli import SlimProtoCLI
+from .cli import SlimProtoCLI, SlimRouteHandler
 from .client import SlimClient
 from .const import SLIMPROTO_PORT
 from .discovery import start_discovery
@@ -34,6 +34,7 @@ class SlimServer:
         name: str | None = None,
         control_port: int = SLIMPROTO_PORT,
         cli_command_handler: SlimCLICommandHandler | None = None,
+        extra_routes: dict[str, SlimRouteHandler] | None = None,
     ) -> None:
         """
         Initialize SlimServer instance.
@@ -49,13 +50,28 @@ class SlimServer:
           Note that only software clients can actually handle a non default control port.
         - cli_command_handler: Optional CLI command handler, e.g., to allow browsing the library.
           The handler can raise NotImplementedError for commands it doesn't support, then the fallback will be used.
+        - extra_routes: Optional dict of {path: handler} to register on the same internal
+          webapp as /cometd and /jsonrpc.js (e.g. for a consuming application's own icon/
+          artwork serving). Paths use aiohttp's syntax and the handlers get every HTTP
+          method. They are registered in dict order; aiohttp tries paths with {variables}
+          in that order, so a catch-all path must come after the paths it overlaps
+          (a path without variables is always tried first). Must be passed here, not
+          added after start() - the router is frozen as part of starting and aiohttp
+          raises if you try to add routes after that. The routes need the JSON-RPC web server
+          (cli_port_json is not None), and cannot replace /jsonrpc.js or /cometd. The web
+          server listens on all interfaces without authentication: a handler must check what it
+          serves itself.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
         self.name = name or get_hostname()
         self.control_port = control_port
         self.cli = SlimProtoCLI(
-            self, cli_port, cli_port_json, command_handler=cli_command_handler
+            self,
+            cli_port,
+            cli_port_json,
+            command_handler=cli_command_handler,
+            extra_routes=extra_routes,
         )
         self._subscribers: list[EventSubscriptionType] = []
         self._server: asyncio.Server | None = None
