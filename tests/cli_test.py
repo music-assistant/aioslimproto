@@ -15,6 +15,7 @@ import pytest
 from aioslimproto.cli import (
     CometDClient,
     SlimProtoCLI,
+    _drop_empty_quality_fields,
     playlist_item_from_media_details,
 )
 from aioslimproto.client import SlimClient
@@ -1041,3 +1042,159 @@ class TestPushPopups:
             client.queue.put_nowait({"channel": "x", "id": 0, "data": {}})  # type: ignore[typeddict-item]
         cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
         assert client.queue.full()
+
+
+class TestStatusShape:
+    """Tests for which fields the status reply carries, and when."""
+
+    @staticmethod
+    def _media(**metadata: str | int) -> MediaDetails:
+        return MediaDetails(
+            url="http://host/stream.flac",
+            metadata=metadata,  # type: ignore[arg-type]
+        )
+
+    @staticmethod
+    async def _status(server: SlimServer, player: SlimClient) -> dict:
+        cli = SlimProtoCLI(server)
+        return cast(
+            "dict",
+            await cli._handle_status(player.player_id, "-", 2),  # noqa: SLF001
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", [PlayerState.BUFFERING, PlayerState.BUFFER_READY])
+    async def test_waiting_to_play_is_sent_while_buffering(
+        self,
+        dummy_server: SlimServer,
+        dummy_player: SlimClient,
+        state: PlayerState,
+    ) -> None:
+        """The position stands still while buffering, so the client must wait."""
+        dummy_player.state = state
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["mode"] == "play"
+        assert status["waitingToPlay"] == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "state", [PlayerState.PLAYING, PlayerState.PAUSED, PlayerState.STOPPED]
+    )
+    async def test_waiting_to_play_is_left_out_otherwise(
+        self,
+        dummy_server: SlimServer,
+        dummy_player: SlimClient,
+        state: PlayerState,
+    ) -> None:
+        """The client treats a sent 0 as true, so the key is left out otherwise."""
+        dummy_player.state = state
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert "waitingToPlay" not in status
+
+    @pytest.mark.asyncio
+    async def test_mode_and_queue_are_sent_when_the_player_is_powered_off(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Power is one more reported field, so it does not hide the queue."""
+        dummy_player.powered = False
+        dummy_player.current_media = self._media(title="Song", duration=200)
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["power"] == 0
+        assert status["mode"] == "stop"
+        assert status["playlist_tracks"] == 1
+        assert status["playlist_loop"][0]["title"] == "Song"
+
+    @pytest.mark.asyncio
+    async def test_nothing_loaded_sends_no_song_fields(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """With nothing in the queue there is no track, position or index."""
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["playlist_tracks"] == 0
+        assert status["playlist_loop"] == []
+        for key in ("time", "duration", "remote", "playlist_cur_index"):
+            assert key not in status
+
+    @pytest.mark.asyncio
+    async def test_a_loaded_track_sends_its_position_and_duration(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """A loaded track has a position, a duration and an index."""
+        dummy_player.current_media = self._media(title="Song", duration=200)
+        dummy_player.elapsed_seconds = 12.7
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["time"] == 12
+        assert status["duration"] == 200
+        assert status["playlist_cur_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_quality_fields_are_left_out_of_the_playlist_loop(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """An empty string is true to the client, so only filled quality keys go out."""
+        dummy_player.current_media = self._media(title="Song", type="flac")
+
+        status = await self._status(dummy_server, dummy_player)
+
+        item = status["playlist_loop"][0]
+        assert item["type"] == "flac"
+        for key in ("bitrate", "samplerate", "samplesize"):
+            assert key not in item
+
+    @pytest.mark.asyncio
+    async def test_extra_data_is_merged_into_the_reply(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """The host's extra_data keys reach the client whatever the power state."""
+        dummy_player.powered = False
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["uuid"] == "player-uuid-1"
+        assert status["seq_no"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_next_track_alone_still_has_a_queue(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """With only a next track, the queue lists it and the song fields follow it."""
+        dummy_player.next_media = self._media(title="Next", duration=90)
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["playlist_tracks"] == 1
+        assert status["playlist_loop"][0]["title"] == "Next"
+        assert status["duration"] == 90
+        assert status["playlist_cur_index"] == 0
+
+
+class TestDropEmptyQualityFields:
+    """The helper that trims a playlist item for the wire."""
+
+    def test_only_empty_quality_fields_are_dropped(self) -> None:
+        """Other empty fields stay; filled quality fields stay."""
+        item = playlist_item_from_media_details(
+            0,
+            MediaDetails(
+                url="http://host/stream.flac",
+                metadata={"title": "Song", "type": "flac", "samplerate": "96000"},  # type: ignore[typeddict-item]
+            ),
+        )
+
+        trimmed = _drop_empty_quality_fields(item)
+
+        assert trimmed["type"] == "flac"
+        assert trimmed["samplerate"] == "96000"
+        assert "bitrate" not in trimmed
+        assert "samplesize" not in trimmed
+        assert trimmed["artist"] == ""
+        assert trimmed["title"] == "Song"
