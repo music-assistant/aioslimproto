@@ -1,6 +1,6 @@
 [build-system]
-build-backend = "setuptools.build_meta"
-requires = ["setuptools>=62.3"]
+build-backend = "uv_build"
+requires = ["uv_build>=0.13.6,<0.14"]
 
 [project]
 authors = [
@@ -41,6 +41,10 @@ test = [
 
 [tool.codespell]
 # ignore-words-list = ""
+
+[tool.uv.build-backend]
+module-root = ""
+source-include = ["font/**"]
 
 [tool.setuptools]
 include-package-data = true
