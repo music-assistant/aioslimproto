@@ -149,6 +149,10 @@ def parse_args(raw_values: list[SlimCLIScalar]) -> tuple[ArgsType, KwargsType]:
     return (args, kwargs)
 
 
+# How long a requested seek's target is shown if the new stream never starts
+SEEK_PENDING_SECONDS = 10.0
+
+
 class SlimProtoCLI:
     """Basic implementation of CLI control for SlimProto players."""
 
@@ -178,6 +182,7 @@ class SlimProtoCLI:
         self.logger = server.logger.getChild("cli")
         self.command_handler = command_handler
         self._cometd_clients: dict[str, CometDClient] = {}
+        self._pending_seeks: dict[str, tuple[int, Any, float]] = {}
         self._player_map: dict[str, str] = {}
         self._apprunner: web.AppRunner | None = None
         self._webapp: web.Application | None = None
@@ -872,6 +877,41 @@ class SlimProtoCLI:
             players.append(item)
         return PlayersResponse(count=len(players), players_loop=players)
 
+    def set_pending_position(self, player_id: str, seconds: float | None) -> None:
+        """
+        Report a seek's target position until the new stream has started.
+
+        Without it the progress bar jumps back to the old position or to 0 while the seek is
+        in flight.
+
+        :param player_id: The player that is going to start the stream.
+        :param seconds: The position the new stream starts at, or None to stop reporting one.
+        """
+        if seconds is None:
+            self._pending_seeks.pop(player_id, None)
+        elif player := self.server.get_player(player_id):
+            # (target seconds, current_media now, start time): a new current_media ends it
+            self._pending_seeks[player_id] = (
+                int(seconds),
+                player.current_media,
+                time.monotonic(),
+            )
+
+    def _corrected_elapsed_seconds(self, player: SlimClient) -> float:
+        """Return the elapsed seconds, corrected for a seek that restarted the stream at 0."""
+        if pending := self._pending_seeks.get(player.player_id):
+            target, media_at_seek, started = pending
+            if (
+                player.current_media is media_at_seek
+                and time.monotonic() - started < SEEK_PENDING_SECONDS
+            ):
+                return target
+            del self._pending_seeks[player.player_id]
+        offset: float = 0
+        if player.current_media and player.current_media.metadata:
+            offset = player.current_media.metadata.get("elapsed_offset", 0) or 0
+        return player.elapsed_seconds + offset
+
     async def _handle_status(
         self,
         player_id: str,
@@ -918,7 +958,7 @@ class SlimProtoCLI:
                 {
                     "remote": 1,
                     "current_title": self.server.name,
-                    "time": int(player.elapsed_seconds),
+                    "time": int(self._corrected_elapsed_seconds(player)),
                     "duration": cur_item.metadata.get("duration", 0),
                 }
                 if cur_item
@@ -1112,7 +1152,7 @@ class SlimProtoCLI:
         if not player:
             return None
         if number == "?":
-            return int(player.elapsed_seconds)
+            return int(self._corrected_elapsed_seconds(player))
         raise NotImplementedError("No handler for seek")
 
     async def _handle_power(
