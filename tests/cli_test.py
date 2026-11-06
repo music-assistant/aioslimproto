@@ -1062,12 +1062,10 @@ class TestExtraRoutes:
         return server
 
     async def test_a_route_of_the_application_is_served(self) -> None:
-        """A request to the route reaches the handler, for any HTTP method."""
+        """A GET reaches the handler, and a HEAD gets the same answer without a body."""
 
         async def cover(request: web.Request) -> web.Response:
-            return web.Response(
-                text=f"{request.method} cover {request.match_info['id']}"
-            )
+            return web.Response(text=f"cover {request.match_info['id']}")
 
         server = await self._started({"/music/{id}/cover": cover})
         try:
@@ -1076,13 +1074,33 @@ class TestExtraRoutes:
                 async with session.get(f"{base}/music/7/cover") as response:
                     assert (response.status, await response.text()) == (
                         200,
-                        "GET cover 7",
+                        "cover 7",
                     )
-                async with session.post(f"{base}/music/8/cover") as response:
-                    assert (response.status, await response.text()) == (
-                        200,
-                        "POST cover 8",
-                    )
+                async with session.head(f"{base}/music/7/cover") as response:
+                    assert (response.status, await response.read()) == (200, b"")
+        finally:
+            await server.cli.stop()
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+    async def test_a_route_of_the_application_only_answers_get_and_head(
+        self, method: str
+    ) -> None:
+        """Other methods are refused before they reach the handler."""
+        calls = []
+
+        async def cover(_request: web.Request) -> web.Response:
+            calls.append(1)
+            return web.Response(text="cover")
+
+        server = await self._started({"/cover": cover})
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            async with (
+                aiohttp.ClientSession() as session,
+                session.request(method, f"{base}/cover") as response,
+            ):
+                assert response.status == 405
+            assert not calls
         finally:
             await server.cli.stop()
 
@@ -1130,6 +1148,20 @@ class TestExtraRoutes:
                 assert (await response.json())["result"]["count"] == 0
         finally:
             await server.cli.stop()
+
+    @pytest.mark.parametrize("path", ["/jsonrpc.js", "/cometd"])
+    def test_a_built_in_route_cannot_be_replaced(
+        self, dummy_server: SlimServer, path: str
+    ) -> None:
+        """Asking for one of the CLI's own paths fails at once, not when it starts."""
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="extra")
+
+        with pytest.raises(ValueError, match="built-in route"):
+            SlimProtoCLI(dummy_server, extra_routes={path: handler})
+        with pytest.raises(ValueError, match="built-in route"):
+            SlimServer(ip_address="127.0.0.1", name="t", extra_routes={path: handler})
 
     def test_without_routes_there_are_none(self, dummy_server: SlimServer) -> None:
         """The default is no extra routes."""
