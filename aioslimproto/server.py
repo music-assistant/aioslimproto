@@ -52,15 +52,15 @@ class SlimServer:
           The handler can raise NotImplementedError for commands it doesn't support, then the fallback will be used.
         - extra_routes: Optional dict of {path: handler} to register on the same internal
           webapp as /cometd and /jsonrpc.js (e.g. for a consuming application's own icon/
-          artwork serving). Paths use aiohttp's syntax and the handlers get every HTTP
-          method. They are registered in dict order; aiohttp tries paths with {variables}
-          in that order, so a catch-all path must come after the paths it overlaps
-          (a path without variables is always tried first). Must be passed here, not
-          added after start() - the router is frozen as part of starting and aiohttp
-          raises if you try to add routes after that. The routes need the JSON-RPC web server
-          (cli_port_json is not None), and cannot replace /jsonrpc.js or /cometd. The web
-          server listens on all interfaces without authentication: a handler must check what it
-          serves itself.
+          artwork serving). Paths use aiohttp's syntax and the handlers answer GET and
+          HEAD requests only. They are registered in dict order; aiohttp tries paths with
+          {variables} in that order, so a catch-all path must come after the paths it
+          overlaps (a path without variables is always tried first). Must be passed here,
+          not added after start() - the router is frozen as part of starting and aiohttp
+          raises if you try to add routes after that. The routes need the JSON-RPC web
+          server (cli_port_json is not None), and a path of /jsonrpc.js or /cometd raises
+          ValueError. The web server listens on all interfaces without authentication: a
+          handler must check what it serves itself.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
