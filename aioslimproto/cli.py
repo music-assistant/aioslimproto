@@ -89,6 +89,10 @@ class SlimCLICommand:
 SlimCLICommandHandler = Callable[
     [SlimCLICommand], SlimCLICommandResponse | Awaitable[SlimCLICommandResponse]
 ]
+# An aiohttp handler for a route a consuming application adds to the CLI web server
+SlimRouteHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+# The paths the CLI web server answers itself; an application's routes cannot take them over
+BUILTIN_ROUTES = ("/jsonrpc.js", "/cometd")
 
 
 @dataclass
@@ -166,17 +170,27 @@ class SlimProtoCLI:
         cli_port: int | None = None,
         cli_port_json: int | None = 0,
         command_handler: SlimCLICommandHandler | None = None,
+        extra_routes: dict[str, SlimRouteHandler] | None = None,
     ) -> None:
         """
         Initialize Telnet and/or Json interface CLI.
 
         Set port to None to disable the interface, set to 0 for auto select a free port.
+        extra_routes ({path: handler}) are added to the JSON-RPC web server, next to
+        /jsonrpc.js and /cometd, and answer GET and HEAD requests only (ignored when
+        cli_port_json is None, as there is no web server).
         """
+        for path in extra_routes or {}:
+            if path in BUILTIN_ROUTES:
+                raise ValueError(  # noqa: TRY003
+                    f"extra_routes cannot replace the built-in route {path}"
+                )
         self.server = server
         self.cli_port = cli_port
         self.cli_port_json = cli_port_json
         self.logger = server.logger.getChild("cli")
         self.command_handler = command_handler
+        self.extra_routes = extra_routes or {}
         self._cometd_clients: dict[str, CometDClient] = {}
         self._player_map: dict[str, str] = {}
         self._apprunner: web.AppRunner | None = None
@@ -215,6 +229,8 @@ class SlimProtoCLI:
                 self._handle_jsonrpc_client,
             )
             self._webapp.router.add_route("*", "/cometd", self._handle_cometd_client)
+            for path, handler in self.extra_routes.items():
+                self._webapp.router.add_get(path, handler)
             await self._apprunner.setup()
             # set host to None to bind to all addresses on both IPv4 and IPv6
             self._tcp_site = web.TCPSite(
