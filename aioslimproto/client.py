@@ -50,6 +50,11 @@ from .models import (
 from .util import parse_capabilities, parse_headers, parse_status
 from .volume import SlimProtoVolume
 
+# A SqueezePlay player throttles its own mixer requests to 150 ms (MIN_KEY_INT in
+# its Player.lua) and increments its sequence counter on every detent, so a gain
+# sent faster than that arrives stamped with a counter the player has passed.
+GAIN_COALESCE_S = 0.15
+
 # ruff: noqa: ARG002,FBT001,FBT002,RUF006
 
 
@@ -1196,9 +1201,39 @@ class SlimClient:
         await self.send_frame(b"aude", struct.pack("2B", int(powered), 1))
 
     async def _send_gain(self) -> None:
-        """Send the current volume level to the player."""
+        """Send the current volume level to the player, coalescing a burst of changes.
+
+        @note A turn of the wheel produces several changes in quick succession, while
+            the player itself only issues one mixer request per 150 ms
+            (`MIN_KEY_INT` in its Player.lua) and increments its sequence counter
+            on every detent. A frame per change therefore arrives stamped with a
+            counter the player has already passed and is discarded by it. One frame
+            per interval, carrying whatever the newest state is when it fires,
+            matches the cadence the player uses for itself. A single change (a key
+            press, a scene) is still sent immediately; only changes that arrive
+            inside the interval wait for the frame already scheduled.
+        """
+        task = getattr(self, "_gain_task", None)
+        if task is not None and not task.done():
+            return
+        wait = GAIN_COALESCE_S - (
+            time.monotonic() - getattr(self, "_gain_sent_at", 0.0)
+        )
+        if wait <= 0:
+            await self._emit_gain()
+            return
+        self._gain_task = asyncio.create_task(self._coalesced_gain(wait))
+
+    async def _coalesced_gain(self, wait: float) -> None:
+        """Emit one gain frame once the interval since the previous one has passed."""
+        await asyncio.sleep(wait)
+        await self._emit_gain()
+
+    async def _emit_gain(self) -> None:
+        """Emit one gain frame for whatever the newest state is now."""
         old_gain = self.volume_control.old_gain()
         new_gain = self.volume_control.new_gain()
+        self._gain_sent_at = time.monotonic()
         await self.send_frame(
             b"audg",
             struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),

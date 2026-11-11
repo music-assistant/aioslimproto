@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
-from aioslimproto.client import SlimClient
+from aioslimproto.client import GAIN_COALESCE_S, SlimClient
 from aioslimproto.models import EventType, MediaDetails, PlayerState
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
@@ -741,3 +741,50 @@ class TestPositionAcrossPauseAndResume:
         await live_client.pause()
         assert live_client.state == PlayerState.PAUSED
         assert live_client.elapsed_milliseconds == 4_000
+
+
+class TestGainCadence:
+    """Gain frames follow the cadence the player itself throttles at."""
+
+    @staticmethod
+    def _audg(client: SlimClient) -> list[bytes]:
+        """Return the audg payloads sent so far."""
+        return [
+            frame.args[1]
+            for frame in client.send_frame.await_args_list
+            if frame.args[0] == b"audg"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_single_change_is_sent_immediately(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key press must not wait for the coalescing interval."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+
+        await client.volume_set(20)
+
+        assert len(self._audg(client)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_burst_of_changes_produces_one_more_frame(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Changes inside the interval share a frame, which carries the newest level."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 0.05)
+
+        await client.volume_set(20)
+        await client.volume_set(30)
+        await client.volume_set(40)
+        await client._gain_task  # noqa: SLF001
+
+        payloads = self._audg(client)
+        assert len(payloads) == 2
+        new_gain = client.volume_control.new_gain()
+        assert struct.unpack("!LLBBLL", payloads[-1])[4:] == (new_gain, new_gain)
+
+    async def test_the_coalescing_interval_is_the_players_own(self) -> None:
+        """The constant matches MIN_KEY_INT in the player's Player.lua."""
+        assert GAIN_COALESCE_S == 0.15
