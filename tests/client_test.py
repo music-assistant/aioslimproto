@@ -894,3 +894,25 @@ class TestMuteIsSilence:
 
         assert client.volume_level == 60
         assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_our_own_change_carries_no_sequence(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A level we set must not be stamped with a number we merely remember.
+
+        The player increments its counter for detents it then suppresses, so a stored
+        number can already be behind that counter and the frame is dropped as out of
+        sync — measured: the room stayed loud while the server said step 1.
+        """
+        client.send_frame = AsyncMock()
+        client.extra_data["seq_no"] = 17
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(20)
+        assert struct.unpack("!LLBBLLL", self._audg(client)[-1])[6] == 17
+
+        client.send_frame.reset_mock()
+        await client.volume_set(30)
+        await client._gain_task  # noqa: SLF001
+
+        assert len(self._audg(client)[-1]) == 18

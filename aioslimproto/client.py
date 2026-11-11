@@ -1267,8 +1267,18 @@ class SlimClient:
         # The player's own sequence number rides in the 22-byte form of the frame,
         # as LMS sends it (Squeezebox2.pm: pack('NNCCNNN', ..., sequenceNumber())),
         # so a gain that still arrives late is recognised as stale rather than
-        # applied. Without a number the player applies the frame unconditionally.
-        sequence = int(self.extra_data.get("seq_no") or 0)
+        # applied. Without a number the player applies the frame unconditionally —
+        # which is what our own changes want: the player also increments its counter
+        # for detents it then suppresses, so a number stored from its last request
+        # can already be behind that counter and our frame is dropped as out of sync
+        # (measured: a stale echo left the room loud while the server said step 1;
+        # the player's current number silenced it with the same frame).
+        known = int(self.extra_data.get("seq_no") or 0)
+        sequence = (
+            known if known and known != getattr(self, "_gain_echoed_seq", 0) else 0
+        )
+        if sequence:
+            self._gain_echoed_seq = sequence
         payload = (
             struct.pack(
                 "!LLBBLLL", old_gain, old_gain, 1, 255, new_gain, new_gain, sequence
