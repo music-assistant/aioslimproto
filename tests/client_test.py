@@ -788,3 +788,30 @@ class TestGainCadence:
     async def test_the_coalescing_interval_is_the_players_own(self) -> None:
         """The constant matches MIN_KEY_INT in the player's Player.lua."""
         assert GAIN_COALESCE_S == 0.15
+
+    @pytest.mark.asyncio
+    async def test_the_players_sequence_number_rides_in_the_frame(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A late frame must be recognisable as stale by the number it carries."""
+        client.send_frame = AsyncMock()
+        client.extra_data["seq_no"] = 17
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+
+        await client.volume_set(20)
+
+        payload = self._audg(client)[0]
+        assert len(payload) == 22
+        assert struct.unpack("!LLBBLLL", payload)[6] == 17
+
+    @pytest.mark.asyncio
+    async def test_without_a_sequence_number_the_short_form_is_used(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A player that reports no counter gets the 18-byte frame it always got."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+
+        await client.volume_set(20)
+
+        assert len(self._audg(client)[0]) == 18

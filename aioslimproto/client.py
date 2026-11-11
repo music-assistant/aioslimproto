@@ -1234,7 +1234,16 @@ class SlimClient:
         old_gain = self.volume_control.old_gain()
         new_gain = self.volume_control.new_gain()
         self._gain_sent_at = time.monotonic()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
+        # The player's own sequence number rides in the 22-byte form of the frame,
+        # as LMS sends it (Squeezebox2.pm: pack('NNCCNNN', ..., sequenceNumber())),
+        # so a gain that still arrives late is recognised as stale rather than
+        # applied. Without a number the player applies the frame unconditionally.
+        sequence = int(self.extra_data.get("seq_no") or 0)
+        payload = (
+            struct.pack(
+                "!LLBBLLL", old_gain, old_gain, 1, 255, new_gain, new_gain, sequence
+            )
+            if sequence
+            else struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain)
         )
+        await self.send_frame(b"audg", payload)
