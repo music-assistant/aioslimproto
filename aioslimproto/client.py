@@ -376,12 +376,25 @@ class SlimClient:
         await self._render_display("show_volume")
 
     async def mute(self, muted: bool = False) -> None:
-        """Send mute command to player."""
-        if self._muted == muted:
-            return
-        muted_int = 0 if muted else 1
-        await self.send_frame(b"aude", struct.pack("2B", muted_int, 0))
+        """Silence the player without losing its level, and restore it on unmute.
+
+        @note The `aude` frame is what the protocol offers, and on SqueezePlay
+            hardware its handler is a stub (`decode_audio_enable` in squeezeplay's
+            `decode.c` is a `// FIXME` that returns without touching the output),
+            so a mute sent that way leaves the room playing. LMS mutes with
+            `$client->volume(0)` for that reason (`Player.pm`, right beside a
+            `# todo: there is actually a hardware mute feature`). This keeps the
+            level in the model and puts gain 0 on the wire; unmuting sends the
+            level back.
+        """
+        changed = self._muted != muted
         self._muted = muted
+        if changed:
+            muted_int = 0 if muted else 1
+            await self.send_frame(b"aude", struct.pack("2B", muted_int, 0))
+        # Always re-send the gain: the flag can be restored on reconnect while the
+        # room sits at a level nobody chose, so flag and room have to be re-agreed.
+        await self._send_gain(force=True)
         self.signal_update()
 
     async def next(self) -> None:
@@ -1200,7 +1213,7 @@ class SlimClient:
         """Send a power state to the player."""
         await self.send_frame(b"aude", struct.pack("2B", int(powered), 1))
 
-    async def _send_gain(self) -> None:
+    async def _send_gain(self, *, force: bool = False) -> None:
         """Send the current volume level to the player, coalescing a burst of changes.
 
         @note A turn of the wheel produces several changes in quick succession, while
@@ -1212,8 +1225,17 @@ class SlimClient:
             matches the cadence the player uses for itself. A single change (a key
             press, a scene) is still sent immediately; only changes that arrive
             inside the interval wait for the frame already scheduled.
+
+        @param force (bool) — True to send now, replacing any frame already
+            scheduled; a mute must not wait for the interval.
         """
         task = getattr(self, "_gain_task", None)
+        if force:
+            if task is not None and not task.done():
+                task.cancel()
+            self._gain_task = None
+            await self._emit_gain()
+            return
         if task is not None and not task.done():
             return
         wait = GAIN_COALESCE_S - (
@@ -1231,8 +1253,16 @@ class SlimClient:
 
     async def _emit_gain(self) -> None:
         """Emit one gain frame for whatever the newest state is now."""
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
+        # A muted player is silent through a gain of 0, with its level kept aside.
+        override = 0 if self._muted else None
+        held = self.volume_control.volume
+        if override is not None:
+            self.volume_control.volume = override
+        try:
+            old_gain = self.volume_control.old_gain()
+            new_gain = self.volume_control.new_gain()
+        finally:
+            self.volume_control.volume = held
         self._gain_sent_at = time.monotonic()
         # The player's own sequence number rides in the 22-byte form of the frame,
         # as LMS sends it (Squeezebox2.pm: pack('NNCCNNN', ..., sequenceNumber())),

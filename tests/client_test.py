@@ -815,3 +815,82 @@ class TestGainCadence:
         await client.volume_set(20)
 
         assert len(self._audg(client)[0]) == 18
+
+
+class TestMuteIsSilence:
+    """A muted player goes quiet through its gain, keeping the level."""
+
+    @staticmethod
+    def _audg(client: SlimClient) -> list[bytes]:
+        """Return the audg payloads sent so far."""
+        return [
+            frame.args[1]
+            for frame in client.send_frame.await_args_list
+            if frame.args[0] == b"audg"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_muting_sends_gain_zero_and_keeps_the_level(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The `aude` frame is a stub on the hardware; the gain is what is heard."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(40)
+
+        await client.mute(muted=True)
+
+        assert client.muted is True
+        assert client.volume_level == 40
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_unmuting_restores_the_held_level(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unmute must send the level back, not a level of its own."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(40)
+        await client.mute(muted=True)
+        client.send_frame.reset_mock()
+
+        await client.mute(muted=False)
+
+        gain = client.volume_control.new_gain()
+        assert client.volume_level == 40
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (gain, gain)
+
+    @pytest.mark.asyncio
+    async def test_a_restored_mute_flag_is_put_back_on_the_wire(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repeating the same flag still re-agrees the room with the model."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(40)
+        await client.mute(muted=True)
+        client.send_frame.reset_mock()
+
+        await client.mute(muted=True)
+
+        assert [frame.args[0] for frame in client.send_frame.await_args_list] == [
+            b"audg"
+        ]
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_a_volume_change_while_muted_stays_silent(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A set on a muted player must not open the room up."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.mute(muted=True)
+        client.send_frame.reset_mock()
+
+        await client.volume_set(60)
+        await client._gain_task  # noqa: SLF001
+
+        assert client.volume_level == 60
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (0, 0)
