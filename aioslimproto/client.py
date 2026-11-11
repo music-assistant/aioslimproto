@@ -37,6 +37,7 @@ from .models import (
     PCM_SAMPLE_RATE,
     PCM_SAMPLE_SIZE,
     SOFTWARE_PLAYER_TYPES,
+    SQUEEZEPLAY_HARDWARE_MODELS,
     ButtonCode,
     EventType,
     MediaDetails,
@@ -713,8 +714,14 @@ class SlimClient:
         self._device_type = DEVICE_TYPE.get(dev_id, "unknown device")
         self._capabilities = parse_capabilities(data)
         self.logger.debug("Player connected: %s", self.player_id)
-        # Use SqueezePlay volume params for software players (matching LMS behavior)
-        if self._device_type in SOFTWARE_PLAYER_TYPES:
+        # Use SqueezePlay volume params for SqueezePlay players (matching LMS behavior).
+        # The hardware models run the same firmware and must be included: they translate
+        # every server gain through that curve, so anything else lands on a wrong level.
+        model = str(self._capabilities.get("Model", "")).lower()
+        if (
+            self._device_type in SOFTWARE_PLAYER_TYPES
+            or model in SQUEEZEPLAY_HARDWARE_MODELS
+        ):
             current_volume = self.volume_control.volume
             self.volume_control = SlimProtoVolume(
                 total_volume_range=-74,

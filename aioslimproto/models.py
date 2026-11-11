@@ -50,14 +50,30 @@ DEVICE_TYPE = {
     100: "squeezeesp32",
 }
 
-# Software player types that use SqueezePlay volume parameters
-# (wider -74dB range with two-slope curve) instead of hardware Squeezebox2 defaults.
+# Player types that render the server's gain through SqueezePlay's own volume curve
+# (the Boom table: -74 dB total range, two-slope). "Software" types get it from
+# SQUEEZEPLAY_PLAYER_TYPES; the hardware models below are SqueezePlay devices too —
+# their firmware sets `_serverVolumeToGain = _defaultVolumeToGain`
+# (share/jive/audio/Playback.lua), so a gain computed on the Squeezebox2 curve lands
+# on a different row of the table and plays louder than it should (measured: step 1
+# played as volume 16, step 8 as 19, converging only above ~50).
 SOFTWARE_PLAYER_TYPES: frozenset[str] = frozenset(
     {
         "squeezeplay",
         "softsqueeze",
         "softsqueeze3",
         "softboom",
+    }
+)
+
+# Hardware model strings (the `Model=` capability of the HELO) that run SqueezePlay.
+SQUEEZEPLAY_HARDWARE_MODELS: frozenset[str] = frozenset(
+    {
+        "baby",  # Squeezebox Radio
+        "fab4",  # Squeezebox Touch
+        "boom",  # Squeezebox Boom
+        "controller",  # Squeezebox Controller / Duet remote
+        "joggler",  # OpenFrame
     }
 )
 

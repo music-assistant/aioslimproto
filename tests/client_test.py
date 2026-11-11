@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from aioslimproto.client import SlimClient
-from aioslimproto.models import EventType, MediaDetails, PlayerState
+from aioslimproto.models import (
+    SOFTWARE_PLAYER_TYPES,
+    SQUEEZEPLAY_HARDWARE_MODELS,
+    EventType,
+    MediaDetails,
+    PlayerState,
+)
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
@@ -741,3 +747,46 @@ class TestPositionAcrossPauseAndResume:
         await live_client.pause()
         assert live_client.state == PlayerState.PAUSED
         assert live_client.elapsed_milliseconds == 4_000
+
+
+class TestSqueezePlayVolumeCurve:
+    """A SqueezePlay player gets the curve its firmware actually applies."""
+
+    _HELO = bytes([2, 0]) + b"\xaa\xbb\xcc\xdd\xee\xff" + bytes(28)
+
+    @staticmethod
+    async def _curve(client: SlimClient, helo: bytes) -> tuple[int, int, float]:
+        """Process a HELO and return the resulting volume parameters."""
+        client.send_frame = AsyncMock()
+        await client._process_helo(helo)  # noqa: SLF001
+        control = client.volume_control
+        client.disconnect()
+        return control.total_volume_range, control.step_point, control.step_fraction
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", ["baby", "fab4", "boom", "controller"])
+    async def test_squeezeplay_hardware_gets_the_boom_curve(
+        self, client: SlimClient, model: str
+    ) -> None:
+        """The firmware renders server gain through its own table, so speak that one.
+
+        A Radio (Model=baby) computed a Squeezebox2 gain of 232 for step 1, which the
+        box then looked up in its Boom table and played as volume 16.
+        """
+        curve = await self._curve(client, self._HELO + b"Model=" + model.encode())
+
+        assert curve == (-74, 25, 0.5)
+
+    @pytest.mark.asyncio
+    async def test_a_classic_squeezebox_keeps_the_squeezebox2_curve(
+        self, client: SlimClient
+    ) -> None:
+        """A pre-SqueezePlay player has no such table, so it keeps its own curve."""
+        curve = await self._curve(client, self._HELO + b"Model=squeezebox")
+
+        assert curve == (-50, -1, 1)
+
+    @pytest.mark.asyncio
+    async def test_the_curve_is_named_once(self) -> None:
+        """The hardware and software lists must not drift apart."""
+        assert not SQUEEZEPLAY_HARDWARE_MODELS & SOFTWARE_PLAYER_TYPES
