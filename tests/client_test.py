@@ -785,6 +785,34 @@ class TestGainCadence:
         new_gain = client.volume_control.new_gain()
         assert struct.unpack("!LLBBLL", payloads[-1])[4:] == (new_gain, new_gain)
 
+    @pytest.mark.asyncio
+    async def test_a_clamped_request_answers_its_number(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A request for the level we already have must not leave a number fresh.
+
+        Turning the wheel up at 100 (or down at 0) is clamped here and sends nothing,
+        while the player's counter moves on. Echoing that number on our next frame
+        makes the player drop it — the reported case being a mute that leaves the
+        room playing.
+        """
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        client.extra_data["seq_no"] = 17
+        await client.volume_set(100)
+        assert struct.unpack("!LLBBLLL", self._audg(client)[-1])[6] == 17
+
+        client.send_frame.reset_mock()
+        client.extra_data["seq_no"] = 18  # the player turned up at 100 and was clamped
+        await client.volume_set(100)
+        assert self._audg(client) == []
+
+        await client.mute(muted=True)
+
+        payload = self._audg(client)[-1]
+        assert len(payload) == 18
+        assert struct.unpack("!LLBBLL", payload)[4:6] == (0, 0)
+
     async def test_the_coalescing_interval_is_the_players_own(self) -> None:
         """The constant matches MIN_KEY_INT in the player's Player.lua."""
         assert GAIN_COALESCE_S == 0.15

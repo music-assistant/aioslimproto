@@ -355,6 +355,12 @@ class SlimClient:
     async def volume_set(self, volume_level: int) -> None:
         """Send new volume level command to player."""
         if volume_level == self.volume_control.volume:
+            # A request for the level we already have sends no frame, but the player
+            # counted it: turning the wheel up at 100 or down at 0 is clamped here, and
+            # its number has moved on. Mark that number answered, or the next change of
+            # ours echoes it as fresh and the player drops the frame as out of sync —
+            # the case where a mute leaves the room playing.
+            self._gain_echoed_seq = int(self.extra_data.get("seq_no") or 0)
             return
         self.volume_control.volume = volume_level
         await self._send_gain()
