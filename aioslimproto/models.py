@@ -50,30 +50,25 @@ DEVICE_TYPE = {
     100: "squeezeesp32",
 }
 
-# Player types that render the server's gain through SqueezePlay's own volume curve
-# (the Boom table: -74 dB total range, two-slope). "Software" types get it from
-# SQUEEZEPLAY_PLAYER_TYPES; the hardware models below are SqueezePlay devices too —
-# their firmware sets `_serverVolumeToGain = _defaultVolumeToGain`
-# (share/jive/audio/Playback.lua), so a gain computed on the Squeezebox2 curve lands
-# on a different row of the table and plays louder than it should (measured: step 1
-# played as volume 16, step 8 as 19, converging only above ~50).
+# Player types that render the server's gain through SqueezePlay's own volume curve.
+# SqueezePlay (Radio, Touch, Controller, Joggler) and the Boom use the Boom table:
+# -74 dB total range with two slopes. The firmware applies that table to whatever
+# gain it receives (`Playback.lua`: `_serverVolumeToGain = _defaultVolumeToGain`):
+# computed on the Squeezebox2 curve lands on a different row and plays louder than
+# asked (measured: step 1 played as volume 16, step 8 as 19, converging above ~50).
+# The device id is enough to pick it — SqueezePlay reports 9 (`LocalPlayer.lua`:
+# `DEVICE_ID = 9`, with only the model string differing per platform) and the Boom
+# reports 10, which is how LMS decides too (`Slim/Networking/Slimproto.pm` →
+# Slim::Player::Boom or Slim::Player::SqueezePlay). A Classic (2), Receiver (7) and
+# Transporter (5) keep the Squeezebox2 curve.
 SOFTWARE_PLAYER_TYPES: frozenset[str] = frozenset(
     {
         "squeezeplay",
         "softsqueeze",
         "softsqueeze3",
         "softboom",
-    }
-)
-
-# Hardware model strings (the `Model=` capability of the HELO) that run SqueezePlay.
-SQUEEZEPLAY_HARDWARE_MODELS: frozenset[str] = frozenset(
-    {
-        "baby",  # Squeezebox Radio
-        "fab4",  # Squeezebox Touch
-        "boom",  # Squeezebox Boom
-        "controller",  # Squeezebox Controller / Duet remote
-        "joggler",  # OpenFrame
+        "controller",
+        "boom",
     }
 )
 

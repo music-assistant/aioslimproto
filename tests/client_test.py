@@ -9,8 +9,6 @@ import pytest
 
 from aioslimproto.client import SlimClient
 from aioslimproto.models import (
-    SOFTWARE_PLAYER_TYPES,
-    SQUEEZEPLAY_HARDWARE_MODELS,
     EventType,
     MediaDetails,
     PlayerState,
@@ -750,43 +748,52 @@ class TestPositionAcrossPauseAndResume:
 
 
 class TestSqueezePlayVolumeCurve:
-    """A SqueezePlay player gets the curve its firmware actually applies."""
-
-    _HELO = bytes([2, 0]) + b"\xaa\xbb\xcc\xdd\xee\xff" + bytes(28)
+    """A player gets the volume curve its own firmware applies."""
 
     @staticmethod
-    async def _curve(client: SlimClient, helo: bytes) -> tuple[int, int, float]:
-        """Process a HELO and return the resulting volume parameters."""
+    def _helo(device_id: int) -> bytes:
+        """Build a HELO for a player that reports `device_id`, as a real one does."""
+        return bytes([device_id, 0]) + b"\xaa\xbb\xcc\xdd\xee\xff" + bytes(28)
+
+    @staticmethod
+    async def _curve(client: SlimClient, device_id: int) -> tuple[int, int, float]:
+        """Process a HELO for `device_id`; return the volume parameters it produced."""
         client.send_frame = AsyncMock()
-        await client._process_helo(helo)  # noqa: SLF001
+        await client._process_helo(TestSqueezePlayVolumeCurve._helo(device_id))  # noqa: SLF001
         control = client.volume_control
         client.disconnect()
         return control.total_volume_range, control.step_point, control.step_fraction
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model", ["baby", "fab4", "boom", "controller"])
-    async def test_squeezeplay_hardware_gets_the_boom_curve(
-        self, client: SlimClient, model: str
+    @pytest.mark.parametrize(
+        ("device_id", "what"),
+        [
+            (9, "SqueezePlay: Radio, Touch, Controller"),
+            (10, "Boom"),
+            (12, "SqueezePlay software"),
+        ],
+    )
+    async def test_players_whose_firmware_uses_the_boom_table(
+        self, client: SlimClient, device_id: int, what: str
     ) -> None:
-        """The firmware renders server gain through its own table, so speak that one.
+        """They render the server's gain through their own table; speak that one.
 
-        A Radio (Model=baby) computed a Squeezebox2 gain of 232 for step 1, which the
-        box then looked up in its Boom table and played as volume 16.
+        A Radio (device id 9, `Model=baby`) computed a Squeezebox2 gain of 232 for
+        step 1, which the box then looked up in its Boom table and played as 16.
         """
-        curve = await self._curve(client, self._HELO + b"Model=" + model.encode())
+        curve = await self._curve(client, device_id)
 
-        assert curve == (-74, 25, 0.5)
+        assert curve == (-74, 25, 0.5), what
 
     @pytest.mark.asyncio
-    async def test_a_classic_squeezebox_keeps_the_squeezebox2_curve(
-        self, client: SlimClient
+    @pytest.mark.parametrize(
+        ("device_id", "what"),
+        [(2, "Classic"), (4, "Squeezebox2"), (5, "Transporter"), (7, "Receiver")],
+    )
+    async def test_players_with_the_squeezebox2_curve(
+        self, client: SlimClient, device_id: int, what: str
     ) -> None:
         """A pre-SqueezePlay player has no such table, so it keeps its own curve."""
-        curve = await self._curve(client, self._HELO + b"Model=squeezebox")
+        curve = await self._curve(client, device_id)
 
-        assert curve == (-50, -1, 1)
-
-    @pytest.mark.asyncio
-    async def test_the_curve_is_named_once(self) -> None:
-        """The hardware and software lists must not drift apart."""
-        assert not SQUEEZEPLAY_HARDWARE_MODELS & SOFTWARE_PLAYER_TYPES
+        assert curve == (-50, -1, 1), what
