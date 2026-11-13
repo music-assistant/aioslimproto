@@ -151,6 +151,17 @@ class TestSyncStart:
         await SyncGroup().start([only], now=1000.0)
         only._send_strm.assert_not_called()  # noqa: SLF001
 
+    async def test_start_instant_wraps_with_the_player_clock(
+        self, make_client: MakeClient
+    ) -> None:
+        """A start instant past the 32-bit jiffies wrap is sent wrapped."""
+        client = make_client("a")
+        client._jiffies_epoch = 0.0  # noqa: SLF001
+
+        await client.start_at((2**32 + 500) / 1000)
+
+        client._send_strm.assert_called_once_with(b"u", replay_gain=500)  # noqa: SLF001
+
 
 class TestCheckSync:
     """Steady-state correction (port of _CheckSync)."""

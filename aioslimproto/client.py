@@ -408,7 +408,8 @@ class SlimClient:
             await self.unpause_at(0)
             return
         interval = int((server_time - self._jiffies_epoch) * self.tics_per_sec)
-        await self.unpause_at(max(0, interval))
+        # jiffies is a 32-bit counter that wraps, so the target wraps with it
+        await self.unpause_at(max(0, interval) & 0xFFFFFFFF)
 
     @property
     def current_url(self) -> str | None:
