@@ -423,10 +423,11 @@ class TestRedirect:
         )
 
 
-def _stmt_payload(jiffies: int) -> bytes:
-    """Build an STMt STAT payload with the given player clock."""
+def _stmt_payload(jiffies: int, elapsed_ms: int = 0) -> bytes:
+    """Build an STMt STAT payload with the given player clock and song position."""
     return b"STMt" + struct.pack(
-        "!BBBLLLLHLLLLHLL", 0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, 0, 0, 0, 0
+        "!BBBLLLLHLLLLHLL",
+        *(0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, elapsed_ms // 1000, 0, elapsed_ms, 0),
     )
 
 
@@ -721,6 +722,24 @@ class TestPositionAcrossPauseAndResume:
         await live_client.pause()
         await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
         assert live_client.play_point == pytest.approx((200.0, 189.65, 10.35))
+
+    @pytest.mark.asyncio
+    async def test_a_heartbeat_while_paused_keeps_the_paused_position(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A heartbeat during the pause moves the player clock, not the position."""
+        self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        live_client._jiffies_epoch = 0.0  # noqa: SLF001
+        live_client.packet_latency = 0.0
+        await live_client.pause()
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        # squeezelite extrapolates its frozen position from a stale status copy
+        await live_client._process_stat(_stmt_payload(203_000, 10_440), received=0.0)  # noqa: SLF001
+        assert live_client.jiffies == 203_000
+        assert live_client.elapsed_milliseconds == 10_350
+        assert live_client.play_point is not None
+        assert live_client.play_point[2] == pytest.approx(10.35)
 
     @pytest.mark.asyncio
     async def test_a_pause_during_a_stream_switch_keeps_the_position_at_zero(

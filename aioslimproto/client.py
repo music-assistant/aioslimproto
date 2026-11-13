@@ -1132,13 +1132,21 @@ class SlimClient:
 
     def _process_stat_stmt(self, data: bytes, received: float) -> None:
         """Process incoming stat STMt message: heartbeat from client."""
-        self._store_status(data)
+        # While paused, squeezelite reports its frozen position extrapolated on wall
+        # time from a status copy up to ~100 ms old, so keep the position of the
+        # pause confirmation (STMp), which a group resume aligns on.
+        self._store_status(data, position=self._state != PlayerState.PAUSED)
         self._last_timestamp = self._jiffies_timestamp
         self.track_jiffies_epoch(self._jiffies, received)
         self.callback(self, EventType.PLAYER_HEARTBEAT)
 
-    def _store_status(self, data: bytes) -> None:
-        """Store the player clock and song position reported in a STAT message."""
+    def _store_status(self, data: bytes, *, position: bool = True) -> None:
+        """
+        Store the player clock and song position reported in a STAT message.
+
+        :param data: The STAT message payload.
+        :param position: Whether to store the song position too, not just the clock.
+        """
         (
             _num_crlf,
             _mas_initialized,
@@ -1159,6 +1167,8 @@ class SlimClient:
 
         self._jiffies = jiffies
         self._jiffies_timestamp = time.time()
+        if not position:
+            return
         if self._awaiting_stream_start:
             # trailing heartbeat of the flushed stream: keep elapsed at 0 until the
             # new stream starts (STMs), so we don't surface the old position
