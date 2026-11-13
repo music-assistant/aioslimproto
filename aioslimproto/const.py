@@ -36,10 +36,10 @@ JIFFIES_EPOCH_MAX_ADJUST = 0.005
 # per-player pref 'packetLatency' (Player.pm), applied in jiffiesToTimestamp
 PACKET_LATENCY = 0.002  # s
 
-# per-player sync defaults. Player.pm base (software players and unknown
-# devices); Squeezebox2.pm uses the tighter value for Squeezebox2-class hardware.
+# per-player sync defaults. Player.pm base (SB1, SqueezeSlave and unknown
+# devices); Squeezebox2.pm sets the tighter value for itself and its subclasses.
 DEFAULT_MIN_SYNC_ADJUST = 30  # ms
-HARDWARE_MIN_SYNC_ADJUST = 10  # ms
+SQUEEZEBOX2_MIN_SYNC_ADJUST = 10  # ms
 DEFAULT_PLAY_DELAY = 0  # ms
 DEFAULT_START_DELAY = 0  # ms
 
