@@ -202,7 +202,7 @@ class SyncGroup:
                 self.next_check += 1
             elif client.can_pause_for:
                 # Currently unreachable: every client reports can_skip_ahead, so the
-                # reference above is always the most-behind player and only the
+                # reference above is always the most-ahead player and only the
                 # skipAhead branch runs. Becomes live once a device class reports
                 # can_skip_ahead=False (LMS gates that on SB1/SliMP3). Kept for LMS
                 # parity; the WiiM case is handled server-side with a pre-start pause.
