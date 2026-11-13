@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from aioslimproto.client import SlimClient
+from aioslimproto.models import PlayerState
 from aioslimproto.sync import SyncGroup
 
 TRUE_OFFSET = 1_700_000_000.0
@@ -101,6 +102,19 @@ class TestPlayPoint:
         client._elapsed_seconds = 2  # noqa: SLF001
 
         assert client.play_point == (10_000.0, 9_998.0, 2.0)
+
+    async def test_song_elapsed_is_zero_while_stopped(
+        self, make_client: MakeClient
+    ) -> None:
+        """A stopped player reports no song position, a paused one its last."""
+        client = make_client()
+        client._elapsed_milliseconds = 42_000  # noqa: SLF001
+        client._elapsed_seconds = 42  # noqa: SLF001
+
+        client._state = PlayerState.PAUSED  # noqa: SLF001
+        assert client.song_elapsed_seconds == 42.0
+        client._state = PlayerState.STOPPED  # noqa: SLF001
+        assert client.song_elapsed_seconds == 0.0
 
     async def test_none_without_elapsed(self, make_client: MakeClient) -> None:
         """No play point is available before the player reports playback."""

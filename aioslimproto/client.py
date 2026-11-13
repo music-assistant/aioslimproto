@@ -356,7 +356,7 @@ class SlimClient:
 
     @property
     def song_elapsed_seconds(self) -> float:
-        """Return the extrapolated song position in seconds.
+        """Return the extrapolated song position in seconds, or 0 while stopped.
 
         Port of ``Slim::Player::Squeezebox2::songElapsedSeconds``: it reconciles the
         two independent STMt status fields (elapsed_milliseconds and elapsed_seconds)
@@ -365,7 +365,9 @@ class SlimClient:
         whereas :attr:`play_point` deliberately stays on the reported value.
         """
         elapsed_ms = self._elapsed_milliseconds
-        if not elapsed_ms and not self._elapsed_seconds:
+        if self._state == PlayerState.STOPPED or (
+            not elapsed_ms and not self._elapsed_seconds
+        ):
             return 0.0
         song_elapsed = elapsed_ms / 1000
         if song_elapsed < self._elapsed_seconds:
