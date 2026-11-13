@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 import inspect
 import logging
+import sys
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
@@ -109,6 +110,9 @@ class SlimServer:
 
     async def stop(self) -> None:
         """Stop running the server."""
+        # stop accepting connections first, players reconnect immediately
+        if self._server:
+            self._server.close()
         # Disconnect all clients and give them time to complete async cleanup
         for client in list(self._players.values()):
             client.disconnect()
@@ -116,7 +120,9 @@ class SlimServer:
         await asyncio.sleep(0.1)
         self._players = {}
         if self._server:
-            self._server.close()
+            if sys.version_info >= (3, 13):
+                # wait_closed() waits for every connection, also unregistered ones
+                self._server.close_clients()
             await self._server.wait_closed()
         if self._discovery:
             self._discovery.close()
