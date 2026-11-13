@@ -8,11 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from aioslimproto.client import SlimClient
-from aioslimproto.models import (
-    EventType,
-    MediaDetails,
-    PlayerState,
-)
+from aioslimproto.models import EventType, MediaDetails, PlayerState
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
@@ -776,11 +772,7 @@ class TestSqueezePlayVolumeCurve:
     async def test_players_whose_firmware_uses_the_boom_table(
         self, client: SlimClient, device_id: int, what: str
     ) -> None:
-        """They render the server's gain through their own table; speak that one.
-
-        A Radio (device id 9, `Model=baby`) computed a Squeezebox2 gain of 232 for
-        step 1, which the box then looked up in its Boom table and played as 16.
-        """
+        """SqueezePlay and Boom firmware map the server's gain via the Boom curve."""
         curve = await self._curve(client, device_id)
 
         assert curve == (-74, 25, 0.5), what
@@ -788,12 +780,17 @@ class TestSqueezePlayVolumeCurve:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("device_id", "what"),
-        [(2, "Classic"), (4, "Squeezebox2"), (5, "Transporter"), (7, "Receiver")],
+        [
+            (2, "Squeezebox"),
+            (4, "Squeezebox2/Classic"),
+            (5, "Transporter"),
+            (7, "Receiver"),
+        ],
     )
     async def test_players_with_the_squeezebox2_curve(
         self, client: SlimClient, device_id: int, what: str
     ) -> None:
-        """A pre-SqueezePlay player has no such table, so it keeps its own curve."""
+        """Pre-SqueezePlay hardware keeps the Squeezebox2 curve."""
         curve = await self._curve(client, device_id)
 
         assert curve == (-50, -1, 1), what
