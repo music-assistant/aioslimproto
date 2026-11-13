@@ -551,16 +551,31 @@ class TestCheckSync:
         first._send_strm.assert_not_called()  # noqa: SLF001
         second._send_strm.assert_not_called()  # noqa: SLF001
 
-    async def test_leaves_a_paused_group_alone(self, make_client: MakeClient) -> None:
-        """A group that is not playing is not corrected, however far apart."""
+    @pytest.mark.parametrize("state", [PlayerState.PAUSED, PlayerState.STOPPED])
+    async def test_leaves_a_group_alone_while_a_player_is_not_playing(
+        self, make_client: MakeClient, state: PlayerState
+    ) -> None:
+        """A group with a paused or stopped player is not corrected."""
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.25, now)
-        first._state = second._state = PlayerState.PAUSED  # noqa: SLF001
+        first._state = state  # noqa: SLF001
 
         await _check_twice(SyncGroup(), [first, second], now)
 
         first._send_strm.assert_not_called()  # noqa: SLF001
         second._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_catches_up_a_player_that_plays_on_after_an_underrun(
+        self, make_client: MakeClient
+    ) -> None:
+        """A player still marked as rebuffering after an underrun is corrected."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        second._state = PlayerState.BUFFERING  # noqa: SLF001
+
+        await _check_twice(SyncGroup(), [first, second], now)
+
+        second._send_strm.assert_called_once_with(b"a", replay_gain=250)  # noqa: SLF001
 
     async def test_noop_for_single_player(self, make_client: MakeClient) -> None:
         """A single player is not a group and is left untouched."""

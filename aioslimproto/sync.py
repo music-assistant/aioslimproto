@@ -149,14 +149,18 @@ class SyncGroup:
 
         A player is only corrected once two consecutive checks, on new play points
         of both the player and the reference, find it off on the same side.
-        Nothing is checked unless all players are playing.
+        Nothing is checked while a player is paused or stopped.
         """
         clients = [c for c in clients if c.maintain_sync]
         if len(clients) < 2:
             return
-        # as in LMS, only while playing: a paused player's play point pairs a fresh
-        # clock with a frozen position, so its apparent start moves with time
-        if any(client.state != PlayerState.PLAYING for client in clients):
+        # A paused or stopped player's play point pairs a fresh clock with a frozen
+        # position, so its apparent start moves with time. A player that rebuffers
+        # after an underrun stays BUFFERING while it plays on, so it is checked.
+        if any(
+            client.state not in (PlayerState.PLAYING, PlayerState.BUFFERING)
+            for client in clients
+        ):
             return
 
         now = now if now is not None else time.monotonic()
