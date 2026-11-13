@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
-from aioslimproto.client import SlimClient
+from aioslimproto.client import GAIN_COALESCE_S, SlimClient
 from aioslimproto.models import EventType, MediaDetails, PlayerState
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
@@ -741,3 +741,206 @@ class TestPositionAcrossPauseAndResume:
         await live_client.pause()
         assert live_client.state == PlayerState.PAUSED
         assert live_client.elapsed_milliseconds == 4_000
+
+
+class TestGainCadence:
+    """Gain frames follow the cadence the player itself throttles at."""
+
+    @staticmethod
+    def _audg(client: SlimClient) -> list[bytes]:
+        """Return the audg payloads sent so far."""
+        return [
+            frame.args[1]
+            for frame in client.send_frame.await_args_list
+            if frame.args[0] == b"audg"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_single_change_is_sent_immediately(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key press must not wait for the coalescing interval."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+
+        await client.volume_set(20)
+
+        assert len(self._audg(client)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_burst_of_changes_produces_one_more_frame(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Changes inside the interval share a frame, which carries the newest level."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 0.05)
+
+        await client.volume_set(20)
+        await client.volume_set(30)
+        await client.volume_set(40)
+        await client._gain_task  # noqa: SLF001
+
+        payloads = self._audg(client)
+        assert len(payloads) == 2
+        new_gain = client.volume_control.new_gain()
+        assert struct.unpack("!LLBBLL", payloads[-1])[4:] == (new_gain, new_gain)
+
+    @pytest.mark.asyncio
+    async def test_a_clamped_request_answers_its_number(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A request for the level we already have must not leave a number fresh.
+
+        Turning the wheel up at 100 (or down at 0) is clamped here and sends nothing,
+        while the player's counter moves on. Echoing that number on our next frame
+        makes the player drop it — the reported case being a mute that leaves the
+        room playing.
+        """
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        client.extra_data["seq_no"] = 17
+        await client.volume_set(100)
+        assert struct.unpack("!LLBBLLL", self._audg(client)[-1])[6] == 17
+
+        client.send_frame.reset_mock()
+        client.extra_data["seq_no"] = 18  # the player turned up at 100 and was clamped
+        await client.volume_set(100)
+        assert self._audg(client) == []
+
+        await client.mute(muted=True)
+
+        payload = self._audg(client)[-1]
+        assert len(payload) == 18
+        assert struct.unpack("!LLBBLL", payload)[4:6] == (0, 0)
+
+    async def test_the_coalescing_interval_is_the_players_own(self) -> None:
+        """The constant matches MIN_KEY_INT in the player's Player.lua."""
+        assert GAIN_COALESCE_S == 0.15
+
+    @pytest.mark.asyncio
+    async def test_the_players_sequence_number_rides_in_the_frame(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A late frame must be recognisable as stale by the number it carries."""
+        client.send_frame = AsyncMock()
+        client.extra_data["seq_no"] = 17
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+
+        await client.volume_set(20)
+
+        payload = self._audg(client)[0]
+        assert len(payload) == 22
+        assert struct.unpack("!LLBBLLL", payload)[6] == 17
+
+    @pytest.mark.asyncio
+    async def test_without_a_sequence_number_the_short_form_is_used(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A player that reports no counter gets the 18-byte frame it always got."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+
+        await client.volume_set(20)
+
+        assert len(self._audg(client)[0]) == 18
+
+
+class TestMuteIsSilence:
+    """A muted player goes quiet through its gain, keeping the level."""
+
+    @staticmethod
+    def _audg(client: SlimClient) -> list[bytes]:
+        """Return the audg payloads sent so far."""
+        return [
+            frame.args[1]
+            for frame in client.send_frame.await_args_list
+            if frame.args[0] == b"audg"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_muting_sends_gain_zero_and_keeps_the_level(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The `aude` frame is a stub on the hardware; the gain is what is heard."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(40)
+
+        await client.mute(muted=True)
+
+        assert client.muted is True
+        assert client.volume_level == 40
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_unmuting_restores_the_held_level(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unmute must send the level back, not a level of its own."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(40)
+        await client.mute(muted=True)
+        client.send_frame.reset_mock()
+
+        await client.mute(muted=False)
+
+        gain = client.volume_control.new_gain()
+        assert client.volume_level == 40
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (gain, gain)
+
+    @pytest.mark.asyncio
+    async def test_a_restored_mute_flag_is_put_back_on_the_wire(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repeating the same flag still re-agrees the room with the model."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(40)
+        await client.mute(muted=True)
+        client.send_frame.reset_mock()
+
+        await client.mute(muted=True)
+
+        assert [frame.args[0] for frame in client.send_frame.await_args_list] == [
+            b"audg"
+        ]
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_a_volume_change_while_muted_stays_silent(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A set on a muted player must not open the room up."""
+        client.send_frame = AsyncMock()
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.mute(muted=True)
+        client.send_frame.reset_mock()
+
+        await client.volume_set(60)
+        await client._gain_task  # noqa: SLF001
+
+        assert client.volume_level == 60
+        assert struct.unpack("!LLBBLL", self._audg(client)[-1])[4:6] == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_our_own_change_carries_no_sequence(
+        self, client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A level we set must not be stamped with a number we merely remember.
+
+        The player increments its counter for detents it then suppresses, so a stored
+        number can already be behind that counter and the frame is dropped as out of
+        sync — measured: the room stayed loud while the server said step 1.
+        """
+        client.send_frame = AsyncMock()
+        client.extra_data["seq_no"] = 17
+        monkeypatch.setattr("aioslimproto.client.GAIN_COALESCE_S", 10.0)
+        await client.volume_set(20)
+        assert struct.unpack("!LLBBLLL", self._audg(client)[-1])[6] == 17
+
+        client.send_frame.reset_mock()
+        await client.volume_set(30)
+        await client._gain_task  # noqa: SLF001
+
+        assert len(self._audg(client)[-1]) == 18

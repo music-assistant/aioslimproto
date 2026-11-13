@@ -50,6 +50,11 @@ from .models import (
 from .util import parse_capabilities, parse_headers, parse_status
 from .volume import SlimProtoVolume
 
+# A SqueezePlay player throttles its own mixer requests to 150 ms (MIN_KEY_INT in
+# its Player.lua) and increments its sequence counter on every detent, so a gain
+# sent faster than that arrives stamped with a counter the player has passed.
+GAIN_COALESCE_S = 0.15
+
 # ruff: noqa: ARG002,FBT001,FBT002,RUF006
 
 
@@ -350,6 +355,12 @@ class SlimClient:
     async def volume_set(self, volume_level: int) -> None:
         """Send new volume level command to player."""
         if volume_level == self.volume_control.volume:
+            # A request for the level we already have sends no frame, but the player
+            # counted it: turning the wheel up at 100 or down at 0 is clamped here, and
+            # its number has moved on. Mark that number answered, or the next change of
+            # ours echoes it as fresh and the player drops the frame as out of sync —
+            # the case where a mute leaves the room playing.
+            self._gain_echoed_seq = int(self.extra_data.get("seq_no") or 0)
             return
         self.volume_control.volume = volume_level
         await self._send_gain()
@@ -371,12 +382,25 @@ class SlimClient:
         await self._render_display("show_volume")
 
     async def mute(self, muted: bool = False) -> None:
-        """Send mute command to player."""
-        if self._muted == muted:
-            return
-        muted_int = 0 if muted else 1
-        await self.send_frame(b"aude", struct.pack("2B", muted_int, 0))
+        """Silence the player without losing its level, and restore it on unmute.
+
+        @note The `aude` frame is what the protocol offers, and on SqueezePlay
+            hardware its handler is a stub (`decode_audio_enable` in squeezeplay's
+            `decode.c` is a `// FIXME` that returns without touching the output),
+            so a mute sent that way leaves the room playing. LMS mutes with
+            `$client->volume(0)` for that reason (`Player.pm`, right beside a
+            `# todo: there is actually a hardware mute feature`). This keeps the
+            level in the model and puts gain 0 on the wire; unmuting sends the
+            level back.
+        """
+        changed = self._muted != muted
         self._muted = muted
+        if changed:
+            muted_int = 0 if muted else 1
+            await self.send_frame(b"aude", struct.pack("2B", muted_int, 0))
+        # Always re-send the gain: the flag can be restored on reconnect while the
+        # room sits at a level nobody chose, so flag and room have to be re-agreed.
+        await self._send_gain(force=True)
         self.signal_update()
 
     async def next(self) -> None:
@@ -1195,11 +1219,77 @@ class SlimClient:
         """Send a power state to the player."""
         await self.send_frame(b"aude", struct.pack("2B", int(powered), 1))
 
-    async def _send_gain(self) -> None:
-        """Send the current volume level to the player."""
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
+    async def _send_gain(self, *, force: bool = False) -> None:
+        """Send the current volume level to the player, coalescing a burst of changes.
+
+        @note A turn of the wheel produces several changes in quick succession, while
+            the player itself only issues one mixer request per 150 ms
+            (`MIN_KEY_INT` in its Player.lua) and increments its sequence counter
+            on every detent. A frame per change therefore arrives stamped with a
+            counter the player has already passed and is discarded by it. One frame
+            per interval, carrying whatever the newest state is when it fires,
+            matches the cadence the player uses for itself. A single change (a key
+            press, a scene) is still sent immediately; only changes that arrive
+            inside the interval wait for the frame already scheduled.
+
+        @param force (bool) — True to send now, replacing any frame already
+            scheduled; a mute must not wait for the interval.
+        """
+        task = getattr(self, "_gain_task", None)
+        if force:
+            if task is not None and not task.done():
+                task.cancel()
+            self._gain_task = None
+            await self._emit_gain()
+            return
+        if task is not None and not task.done():
+            return
+        wait = GAIN_COALESCE_S - (
+            time.monotonic() - getattr(self, "_gain_sent_at", 0.0)
         )
+        if wait <= 0:
+            await self._emit_gain()
+            return
+        self._gain_task = asyncio.create_task(self._coalesced_gain(wait))
+
+    async def _coalesced_gain(self, wait: float) -> None:
+        """Emit one gain frame once the interval since the previous one has passed."""
+        await asyncio.sleep(wait)
+        await self._emit_gain()
+
+    async def _emit_gain(self) -> None:
+        """Emit one gain frame for whatever the newest state is now."""
+        # A muted player is silent through a gain of 0, with its level kept aside.
+        override = 0 if self._muted else None
+        held = self.volume_control.volume
+        if override is not None:
+            self.volume_control.volume = override
+        try:
+            old_gain = self.volume_control.old_gain()
+            new_gain = self.volume_control.new_gain()
+        finally:
+            self.volume_control.volume = held
+        self._gain_sent_at = time.monotonic()
+        # The player's own sequence number rides in the 22-byte form of the frame,
+        # as LMS sends it (Squeezebox2.pm: pack('NNCCNNN', ..., sequenceNumber())),
+        # so a gain that still arrives late is recognised as stale rather than
+        # applied. Without a number the player applies the frame unconditionally —
+        # which is what our own changes want: the player also increments its counter
+        # for detents it then suppresses, so a number stored from its last request
+        # can already be behind that counter and our frame is dropped as out of sync
+        # (measured: a stale echo left the room loud while the server said step 1;
+        # the player's current number silenced it with the same frame).
+        known = int(self.extra_data.get("seq_no") or 0)
+        sequence = (
+            known if known and known != getattr(self, "_gain_echoed_seq", 0) else 0
+        )
+        if sequence:
+            self._gain_echoed_seq = sequence
+        payload = (
+            struct.pack(
+                "!LLBBLLL", old_gain, old_gain, 1, 255, new_gain, new_gain, sequence
+            )
+            if sequence
+            else struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain)
+        )
+        await self.send_frame(b"audg", payload)
