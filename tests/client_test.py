@@ -742,6 +742,23 @@ class TestPositionAcrossPauseAndResume:
         assert live_client.play_point[2] == pytest.approx(10.35)
 
     @pytest.mark.asyncio
+    async def test_a_heartbeat_after_the_resume_sets_the_position_again(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once the player confirms the resume, its heartbeats report the position."""
+        self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        live_client._jiffies_epoch = 0.0  # noqa: SLF001
+        live_client.packet_latency = 0.0
+        await live_client.pause()
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+        await live_client._process_stat(_stmt_payload(206_000, 11_350), received=0.0)  # noqa: SLF001
+        assert live_client.elapsed_milliseconds == 11_350
+        assert live_client.play_point is not None
+        assert live_client.play_point[2] == pytest.approx(11.35)
+
+    @pytest.mark.asyncio
     async def test_a_pause_during_a_stream_switch_keeps_the_position_at_zero(
         self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
