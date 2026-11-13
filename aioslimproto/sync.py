@@ -44,9 +44,10 @@ class SyncGroup:
     def __init__(self) -> None:
         """Initialize the group."""
         self.next_check: float = 0.0
-        # player_id -> whether it was behind the reference, for each player outside
-        # the deadband on the previous check
-        self._deviating: dict[str, bool] = {}
+        # player_id -> (behind the reference, status time of its play point, status
+        # time of the reference's play point), for each player outside the deadband
+        # on the previous check
+        self._deviating: dict[str, tuple[bool, float, float]] = {}
 
     async def start(
         self,
@@ -145,8 +146,8 @@ class SyncGroup:
         """
         Correct drift between players (port of ``_CheckSync``).
 
-        A player is only corrected once two consecutive checks find it off on the
-        same side of the reference.
+        A player is only corrected once two consecutive checks, on new play points
+        of both the player and the reference, find it off on the same side.
         """
         clients = [c for c in clients if c.maintain_sync]
         if len(clients) < 2:
@@ -161,6 +162,7 @@ class SyncGroup:
         # need a recent play-point from all players, otherwise give up
         recent_threshold = now - PLAYPOINT_RECENT_THRESHOLD
         play_points: list[tuple[SlimClient, float]] = []
+        status_times: dict[str, float] = {}
         for client in clients:
             play_point = client.play_point
             if play_point is None:
@@ -168,6 +170,7 @@ class SyncGroup:
                 return
             if play_point[0] > recent_threshold:
                 play_points.append((client, play_point[1] + client.play_delay / 1000))
+                status_times[client.player_id] = play_point[0]
             else:
                 LOGGER.debug(
                     "%s bailing as playPoint too old: %.1fs",
@@ -198,7 +201,7 @@ class SyncGroup:
             and play_points[reference][0].can_skip_ahead
         ):
             reference += 1
-        reference_time = play_points[reference][1]
+        reference_client, reference_time = play_points[reference]
 
         for index, (client, apparent_start) in enumerate(play_points):
             if index == reference:
@@ -212,10 +215,22 @@ class SyncGroup:
                 continue
             # Deliberate deviation from _CheckSync, which corrects on a single play
             # point: one noisy reading would trigger an audible skip, so wait until
-            # the next check confirms the deviation on the same side.
+            # the next check confirms the deviation on the same side, from new
+            # readings of both this player and the reference.
             behind = index < reference
-            if previous.get(client.player_id) != behind:
-                self._deviating[client.player_id] = behind
+            reading = (
+                behind,
+                status_times[client.player_id],
+                status_times[reference_client.player_id],
+            )
+            last = previous.get(client.player_id)
+            if (
+                last is None
+                or last[0] != behind
+                or last[1] == reading[1]
+                or last[2] == reading[2]
+            ):
+                self._deviating[client.player_id] = reading
                 continue
             if behind:
                 LOGGER.info("%s resync: skipAhead %dms", client.player_id, delta * 1000)

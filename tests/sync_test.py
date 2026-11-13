@@ -67,9 +67,20 @@ def _set_play_point(client: SlimClient, status_time: float, apparent: float) -> 
     client._elapsed_milliseconds = int((status_time - apparent) * 1000)  # noqa: SLF001
 
 
+def _shift_reading(client: SlimClient, millis: int) -> None:
+    """Move the client's last report in time, keeping its apparent start."""
+    client._jiffies += millis  # noqa: SLF001
+    client._elapsed_milliseconds += millis  # noqa: SLF001
+
+
 async def _check_twice(group: SyncGroup, clients: list[SlimClient], now: float) -> None:
-    """Run two consecutive sync checks on unchanged play points, the last at now."""
+    """Run two consecutive sync checks on new reports of unchanged play points."""
+    step = round(CHECK_SYNC_INTERVAL * 1000)
+    for client in clients:
+        _shift_reading(client, -step)
     await group.check(clients, now=now - CHECK_SYNC_INTERVAL)
+    for client in clients:
+        _shift_reading(client, step)
     await group.check(clients, now=now)
 
 
@@ -228,6 +239,8 @@ class TestSyncClock:
 
         await group.check([first, second])
         clock.mono += CHECK_SYNC_INTERVAL
+        for client in (first, second):
+            _shift_reading(client, round(CHECK_SYNC_INTERVAL * 1000))
         await group.check([first, second])
 
         second._send_strm.assert_any_call(b"a", replay_gain=250)  # noqa: SLF001
@@ -430,6 +443,8 @@ class TestSyncResume:
         second._send_strm.assert_not_called()  # noqa: SLF001
 
         await group.check([first, second], now=now + 2.3)
+        for client in (first, second):
+            _shift_reading(client, 1000)
         await group.check([first, second], now=now + 3.3)
         call_args = second._send_strm.call_args  # noqa: SLF001
         assert call_args.args[0] == b"a"
@@ -588,6 +603,36 @@ class TestCheckSync:
         assert call_args.args[0] == b"a"
         assert call_args.kwargs["replay_gain"] == pytest.approx(125, abs=1)
         first._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_a_repeated_reading_does_not_confirm(
+        self, make_client: MakeClient
+    ) -> None:
+        """A second check on the same report of the player is no confirmation."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await group.check([first, second], now=now)
+        _shift_reading(first, round(CHECK_SYNC_INTERVAL * 1000))
+
+        await group.check([first, second], now=group.next_check)
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+        await self._check_again(group, first, second, 8000.25)
+        second._send_strm.assert_called_once()  # noqa: SLF001
+
+    async def test_a_repeated_reference_reading_does_not_confirm(
+        self, make_client: MakeClient
+    ) -> None:
+        """A second check on the same report of the reference is no confirmation."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await group.check([first, second], now=now)
+        _shift_reading(second, round(CHECK_SYNC_INTERVAL * 1000))
+
+        await group.check([first, second], now=group.next_check)
+
+        second._send_strm.assert_not_called()  # noqa: SLF001
 
     async def test_a_deviation_that_changes_side_is_not_confirmed(
         self, make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
