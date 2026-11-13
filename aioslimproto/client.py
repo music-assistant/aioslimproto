@@ -44,7 +44,7 @@ from .models import (
     FORMAT_BYTE,
     PCM_SAMPLE_RATE,
     PCM_SAMPLE_SIZE,
-    SOFTWARE_PLAYER_TYPES,
+    SQUEEZEPLAY_VOLUME_PLAYER_TYPES,
     ButtonCode,
     EventType,
     MediaDetails,
@@ -872,8 +872,8 @@ class SlimClient:
         self.min_sync_adjust = min_sync_adjust_for(self._device_type)
         self._capabilities = parse_capabilities(data)
         self.logger.debug("Player connected: %s", self.player_id)
-        # Use SqueezePlay volume params for software players (matching LMS behavior)
-        if self._device_type in SOFTWARE_PLAYER_TYPES:
+        # Use SqueezePlay volume params for SqueezePlay and Boom players (as LMS does)
+        if self._device_type in SQUEEZEPLAY_VOLUME_PLAYER_TYPES:
             current_volume = self.volume_control.volume
             self.volume_control = SlimProtoVolume(
                 total_volume_range=-74,

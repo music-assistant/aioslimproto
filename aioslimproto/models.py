@@ -52,14 +52,17 @@ DEVICE_TYPE = {
     100: "squeezeesp32",
 }
 
-# Software player types that use SqueezePlay volume parameters
-# (wider -74dB range with two-slope curve) instead of hardware Squeezebox2 defaults.
-SOFTWARE_PLAYER_TYPES: frozenset[str] = frozenset(
+# Player types that use SqueezePlay volume parameters (wider -74dB range with two-slope
+# curve) instead of the Squeezebox2 defaults. SqueezePlay firmware (Radio, Touch,
+# Controller, software) and the Boom map every gain they receive through this curve.
+SQUEEZEPLAY_VOLUME_PLAYER_TYPES: frozenset[str] = frozenset(
     {
         "squeezeplay",
         "softsqueeze",
         "softsqueeze3",
         "softboom",
+        "controller",
+        "boom",
     }
 )
 
