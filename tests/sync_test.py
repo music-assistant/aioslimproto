@@ -357,6 +357,23 @@ class TestSyncResume:
         assert self._start_instant(ahead) == pytest.approx(base + 0.050, abs=0.002)
         assert self._start_instant(behind) == pytest.approx(base, abs=0.002)
 
+    async def test_keeps_a_play_delay_lead_across_the_resume(
+        self, make_client: MakeClient
+    ) -> None:
+        """A player with a play delay starts that much earlier, as on a start."""
+        delayed = make_client("a")
+        plain = make_client("b")
+        delayed.play_delay = 50
+        # in sync, the delayed player runs its play delay ahead in song position
+        self._set_paused_position(delayed, 42_050)
+        self._set_paused_position(plain, 42_000)
+
+        await SyncGroup().resume([delayed, plain], self.PAUSED_AT, now=self.NOW)
+
+        base = self.NOW + 0.200
+        assert self._start_instant(delayed) == pytest.approx(base, abs=0.002)
+        assert self._start_instant(plain) == pytest.approx(base, abs=0.002)
+
     async def test_player_without_play_point_starts_at_the_base_instant(
         self, make_client: MakeClient
     ) -> None:

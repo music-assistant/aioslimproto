@@ -92,7 +92,8 @@ class SyncGroup:
         Mirrors LMS ``StreamingController::_Resume``: a single player is resumed
         plainly, while a group is resumed at a common server instant with each
         player delayed by however far past the pause point its reported song
-        position has moved. The first sync check is held off
+        position has moved, less its ``play_delay`` (as in :meth:`start`).
+        The first sync check is held off
         (``SYNC_RESUME_HOLDOFF``) so it does not compare play points taken while
         paused.
 
@@ -118,7 +119,7 @@ class SyncGroup:
 
         start_at_base = now + SYNC_START_DELAY / 1000
         for client in clients:
-            start_at = start_at_base
+            start_at = start_at_base - client.play_delay / 1000
             play_point = client.play_point
             if play_point is not None and (delay := play_point[2] - paused_at) >= 0:
                 start_at += delay
