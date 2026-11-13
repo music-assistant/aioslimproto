@@ -741,3 +741,56 @@ class TestPositionAcrossPauseAndResume:
         await live_client.pause()
         assert live_client.state == PlayerState.PAUSED
         assert live_client.elapsed_milliseconds == 4_000
+
+
+class TestSqueezePlayVolumeCurve:
+    """A player gets the volume curve its own firmware applies."""
+
+    @staticmethod
+    def _helo(device_id: int) -> bytes:
+        """Build a HELO for a player that reports `device_id`, as a real one does."""
+        return bytes([device_id, 0]) + b"\xaa\xbb\xcc\xdd\xee\xff" + bytes(28)
+
+    @staticmethod
+    async def _curve(client: SlimClient, device_id: int) -> tuple[int, int, float]:
+        """Process a HELO for `device_id`; return the volume parameters it produced."""
+        client.send_frame = AsyncMock()
+        await client._process_helo(TestSqueezePlayVolumeCurve._helo(device_id))  # noqa: SLF001
+        control = client.volume_control
+        client.disconnect()
+        return control.total_volume_range, control.step_point, control.step_fraction
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("device_id", "what"),
+        [
+            (9, "SqueezePlay: Radio, Touch, Controller"),
+            (10, "Boom"),
+            (12, "SqueezePlay software"),
+        ],
+    )
+    async def test_players_whose_firmware_uses_the_boom_table(
+        self, client: SlimClient, device_id: int, what: str
+    ) -> None:
+        """SqueezePlay and Boom firmware map the server's gain via the Boom curve."""
+        curve = await self._curve(client, device_id)
+
+        assert curve == (-74, 25, 0.5), what
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("device_id", "what"),
+        [
+            (2, "Squeezebox"),
+            (4, "Squeezebox2/Classic"),
+            (5, "Transporter"),
+            (7, "Receiver"),
+        ],
+    )
+    async def test_players_with_the_squeezebox2_curve(
+        self, client: SlimClient, device_id: int, what: str
+    ) -> None:
+        """Pre-SqueezePlay hardware keeps the Squeezebox2 curve."""
+        curve = await self._curve(client, device_id)
+
+        assert curve == (-50, -1, 1), what
