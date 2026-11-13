@@ -233,6 +233,7 @@ class TestSyncClock:
         first, second = make_client("a"), make_client("b")
         for client, apparent in ((first, 8000.0), (second, 8000.25)):
             client.min_sync_adjust = 10
+            client._state = PlayerState.PLAYING  # noqa: SLF001
             _set_play_point(client, clock.mono - 0.2, apparent)
         clock.wall += 3_600
         group = SyncGroup()
@@ -434,11 +435,15 @@ class TestSyncResume:
         group = SyncGroup()
         await group.resume([first, second], self.PAUSED_AT, now=now)
         second._send_strm.reset_mock()  # noqa: SLF001
+        for client in (first, second):
+            client._state = PlayerState.PLAYING  # noqa: SLF001
         # the second player is now 250ms behind
         _set_play_point(first, now + 1.9, 8000.0)
         _set_play_point(second, now + 1.9, 8000.25)
 
         await group.check([first, second], now=now + 1.0)
+        for client in (first, second):
+            _shift_reading(client, 1000)
         await group.check([first, second], now=now + 2.1)
         second._send_strm.assert_not_called()  # noqa: SLF001
 
@@ -465,6 +470,7 @@ class TestCheckSync:
         second = make_client("b")
         for client, apparent in ((first, apparent_a), (second, apparent_b)):
             client.min_sync_adjust = 10
+            client._state = PlayerState.PLAYING  # noqa: SLF001
             _set_play_point(client, now - 0.2, apparent)
         return first, second
 
@@ -541,6 +547,17 @@ class TestCheckSync:
         first._send_strm.reset_mock()  # noqa: SLF001
         second._send_strm.reset_mock()  # noqa: SLF001
         await group.check([first, second], now=now)
+
+        first._send_strm.assert_not_called()  # noqa: SLF001
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_leaves_a_paused_group_alone(self, make_client: MakeClient) -> None:
+        """A group that is not playing is not corrected, however far apart."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        first._state = second._state = PlayerState.PAUSED  # noqa: SLF001
+
+        await _check_twice(SyncGroup(), [first, second], now)
 
         first._send_strm.assert_not_called()  # noqa: SLF001
         second._send_strm.assert_not_called()  # noqa: SLF001

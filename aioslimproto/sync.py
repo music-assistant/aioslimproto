@@ -23,6 +23,7 @@ from .const import (
     SYNC_RESUME_HOLDOFF,
     SYNC_START_DELAY,
 )
+from .models import PlayerState
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -148,9 +149,14 @@ class SyncGroup:
 
         A player is only corrected once two consecutive checks, on new play points
         of both the player and the reference, find it off on the same side.
+        Nothing is checked unless all players are playing.
         """
         clients = [c for c in clients if c.maintain_sync]
         if len(clients) < 2:
+            return
+        # as in LMS, only while playing: a paused player's play point pairs a fresh
+        # clock with a frozen position, so its apparent start moves with time
+        if any(client.state != PlayerState.PLAYING for client in clients):
             return
 
         now = now if now is not None else time.monotonic()
