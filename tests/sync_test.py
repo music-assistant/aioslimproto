@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from aioslimproto.client import SlimClient
+from aioslimproto.const import CHECK_SYNC_INTERVAL
 from aioslimproto.models import PlayerState
 from aioslimproto.sync import SyncGroup
 
@@ -64,6 +65,12 @@ def _set_play_point(client: SlimClient, status_time: float, apparent: float) -> 
     client.packet_latency = 0.0
     client._jiffies = int(status_time * 1000)  # noqa: SLF001
     client._elapsed_milliseconds = int((status_time - apparent) * 1000)  # noqa: SLF001
+
+
+async def _check_twice(group: SyncGroup, clients: list[SlimClient], now: float) -> None:
+    """Run two consecutive sync checks on unchanged play points, the last at now."""
+    await group.check(clients, now=now - CHECK_SYNC_INTERVAL)
+    await group.check(clients, now=now)
 
 
 class TestJiffiesEpoch:
@@ -217,8 +224,11 @@ class TestSyncClock:
             client.min_sync_adjust = 10
             _set_play_point(client, clock.mono - 0.2, apparent)
         clock.wall += 3_600
+        group = SyncGroup()
 
-        await SyncGroup().check([first, second])
+        await group.check([first, second])
+        clock.mono += CHECK_SYNC_INTERVAL
+        await group.check([first, second])
 
         second._send_strm.assert_any_call(b"a", replay_gain=250)  # noqa: SLF001
 
@@ -415,10 +425,12 @@ class TestSyncResume:
         _set_play_point(first, now + 1.9, 8000.0)
         _set_play_point(second, now + 1.9, 8000.25)
 
+        await group.check([first, second], now=now + 1.0)
         await group.check([first, second], now=now + 2.1)
         second._send_strm.assert_not_called()  # noqa: SLF001
 
         await group.check([first, second], now=now + 2.3)
+        await group.check([first, second], now=now + 3.3)
         call_args = second._send_strm.call_args  # noqa: SLF001
         assert call_args.args[0] == b"a"
         assert call_args.kwargs["replay_gain"] == pytest.approx(250, abs=1)
@@ -449,7 +461,7 @@ class TestCheckSync:
         _set_play_point(first, now - 5, 8000.0)
         _set_play_point(second, now - 5, 8000.2)
 
-        await SyncGroup().check([first, second], now=now)
+        await _check_twice(SyncGroup(), [first, second], now)
 
         first._send_strm.assert_not_called()  # noqa: SLF001
         second._send_strm.assert_not_called()  # noqa: SLF001
@@ -461,7 +473,7 @@ class TestCheckSync:
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.005, now)
 
-        await SyncGroup().check([first, second], now=now)
+        await _check_twice(SyncGroup(), [first, second], now)
 
         first._send_strm.assert_not_called()  # noqa: SLF001
         second._send_strm.assert_not_called()  # noqa: SLF001
@@ -471,7 +483,7 @@ class TestCheckSync:
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8030.0, now)
 
-        await SyncGroup().check([first, second], now=now)
+        await _check_twice(SyncGroup(), [first, second], now)
 
         second._send_strm.assert_not_called()  # noqa: SLF001
 
@@ -482,7 +494,7 @@ class TestCheckSync:
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.25, now)
 
-        await SyncGroup().check([first, second], now=now)
+        await _check_twice(SyncGroup(), [first, second], now)
 
         second._send_strm.assert_any_call(b"a", replay_gain=250)  # noqa: SLF001
         first._send_strm.assert_not_called()  # noqa: SLF001
@@ -499,7 +511,7 @@ class TestCheckSync:
         now = 9000.0
         first, second = self._group(make_client, 8000.25, 8000.0, now)
 
-        await SyncGroup().check([first, second], now=now)
+        await _check_twice(SyncGroup(), [first, second], now)
 
         second._send_strm.assert_any_call(b"p", replay_gain=250)  # noqa: SLF001
         first._send_strm.assert_not_called()  # noqa: SLF001
@@ -531,7 +543,7 @@ class TestCheckSync:
         first, second = self._group(make_client, 8000.0, 8000.25, now)
         second._elapsed_milliseconds = 0  # noqa: SLF001
 
-        await SyncGroup().check([first, second], now=now)
+        await _check_twice(SyncGroup(), [first, second], now)
 
         first._send_strm.assert_not_called()  # noqa: SLF001
         second._send_strm.assert_not_called()  # noqa: SLF001
@@ -547,3 +559,121 @@ class TestCheckSync:
             await SyncGroup().check([first, second], now=now)
 
         assert "playPoints:" in caplog.text
+
+    async def test_a_single_deviating_check_does_not_correct(
+        self, make_client: MakeClient
+    ) -> None:
+        """One play point off the reference is not enough for a correction."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+
+        await SyncGroup().check([first, second], now=now)
+
+        first._send_strm.assert_not_called()  # noqa: SLF001
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_two_deviating_checks_correct_by_the_latest_deviation(
+        self, make_client: MakeClient
+    ) -> None:
+        """A deviation seen on two checks in a row is corrected by its latest size."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await group.check([first, second], now=now)
+
+        await self._check_again(group, first, second, 8000.125)
+
+        second._send_strm.assert_called_once()  # noqa: SLF001
+        call_args = second._send_strm.call_args  # noqa: SLF001
+        assert call_args.args[0] == b"a"
+        assert call_args.kwargs["replay_gain"] == pytest.approx(125, abs=1)
+        first._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_a_deviation_that_changes_side_is_not_confirmed(
+        self, make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A player behind the reference and then ahead of it is left alone."""
+        monkeypatch.setattr(
+            SlimClient,
+            "can_skip_ahead",
+            property(lambda self: self.player_id != "a"),
+        )
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await group.check([first, second], now=now)
+
+        await self._check_again(group, first, second, 7999.75)
+
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_a_correction_needs_a_fresh_confirmation(
+        self, make_client: MakeClient
+    ) -> None:
+        """After a correction, a remaining deviation is confirmed again first."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await _check_twice(group, [first, second], now)
+        second._send_strm.assert_called_once_with(b"a", replay_gain=250)  # noqa: SLF001
+        second._send_strm.reset_mock()  # noqa: SLF001
+
+        await self._check_again(group, first, second, 8000.25)
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+        await self._check_again(group, first, second, 8000.25)
+        second._send_strm.assert_called_once()  # noqa: SLF001
+
+    async def test_a_player_back_in_sync_drops_its_deviation(
+        self, make_client: MakeClient
+    ) -> None:
+        """A deviation interrupted by a check inside the deadband starts over."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await group.check([first, second], now=now)
+
+        await self._check_again(group, first, second, 8000.005)
+        await self._check_again(group, first, second, 8000.25)
+
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_start_drops_an_unconfirmed_deviation(
+        self, make_client: MakeClient
+    ) -> None:
+        """A deviation seen before a group start is not confirmed after it."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await group.check([first, second], now=now)
+        await group.start([first, second], now=now + 0.1)
+        second._send_strm.reset_mock()  # noqa: SLF001
+
+        await self._check_again(group, first, second, 8000.25)
+
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+    async def test_resume_drops_an_unconfirmed_deviation(
+        self, make_client: MakeClient
+    ) -> None:
+        """A deviation seen before a group resume is not confirmed after it."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await group.check([first, second], now=now)
+        await group.resume([first, second], paused_at=1000.0, now=now + 0.1)
+        second._send_strm.reset_mock()  # noqa: SLF001
+
+        await self._check_again(group, first, second, 8000.25)
+
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+    @staticmethod
+    async def _check_again(
+        group: SyncGroup, first: SlimClient, second: SlimClient, apparent_b: float
+    ) -> None:
+        """Run the next due check, with fresh play points and b at apparent_b."""
+        later = group.next_check
+        _set_play_point(first, later - 0.2, 8000.0)
+        _set_play_point(second, later - 0.2, apparent_b)
+        await group.check([first, second], now=later)

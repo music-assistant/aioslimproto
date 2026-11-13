@@ -44,6 +44,9 @@ class SyncGroup:
     def __init__(self) -> None:
         """Initialize the group."""
         self.next_check: float = 0.0
+        # player_id -> whether it was behind the reference, for each player outside
+        # the deadband on the previous check
+        self._deviating: dict[str, bool] = {}
 
     async def start(
         self,
@@ -59,6 +62,7 @@ class SyncGroup:
         ~276-441ms off a SqueezeLite). A per-player learned start offset is a
         possible future improvement.
         """
+        self._deviating.clear()
         clients = list(clients)
         if len(clients) < 2:
             return
@@ -109,6 +113,7 @@ class SyncGroup:
         :param paused_at: The song position (seconds) at which the group was paused.
         :param now: Optional server time override (for testing).
         """
+        self._deviating.clear()
         clients = list(clients)
         now = now if now is not None else time.monotonic()
 
@@ -137,7 +142,12 @@ class SyncGroup:
         clients: Iterable[SlimClient],
         now: float | None = None,
     ) -> None:
-        """Correct drift between players (port of ``_CheckSync``)."""
+        """
+        Correct drift between players (port of ``_CheckSync``).
+
+        A player is only corrected once two consecutive checks find it off on the
+        same side of the reference.
+        """
         clients = [c for c in clients if c.maintain_sync]
         if len(clients) < 2:
             return
@@ -146,6 +156,7 @@ class SyncGroup:
         if now < self.next_check:
             return
         self.next_check = now + CHECK_SYNC_INTERVAL
+        previous, self._deviating = self._deviating, {}
 
         # need a recent play-point from all players, otherwise give up
         recent_threshold = now - PLAYPOINT_RECENT_THRESHOLD
@@ -199,7 +210,14 @@ class SyncGroup:
                 or delta < client.min_sync_adjust / 1000
             ):
                 continue
-            if index < reference:
+            # Deliberate deviation from _CheckSync, which corrects on a single play
+            # point: one noisy reading would trigger an audible skip, so wait until
+            # the next check confirms the deviation on the same side.
+            behind = index < reference
+            if previous.get(client.player_id) != behind:
+                self._deviating[client.player_id] = behind
+                continue
+            if behind:
                 LOGGER.info("%s resync: skipAhead %dms", client.player_id, delta * 1000)
                 await client.skip_over(int(delta * 1000))
                 self.next_check += 1
