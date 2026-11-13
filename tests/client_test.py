@@ -430,6 +430,14 @@ def _stmt_payload(jiffies: int) -> bytes:
     )
 
 
+def _stmp_payload(jiffies: int, elapsed_ms: int) -> bytes:
+    """Build an STMp STAT payload with the given player clock and song position."""
+    return b"STMp" + struct.pack(
+        "!BBBLLLLHLLLLHLL",
+        *(0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, elapsed_ms // 1000, 0, elapsed_ms, 0),
+    )
+
+
 class TestJiffies:
     """jiffies follows the player clock from its last STMt, whatever the stream does."""
 
@@ -693,13 +701,36 @@ class TestPositionAcrossPauseAndResume:
     async def test_a_pause_made_on_the_player_holds_the_position_too(
         self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A pause the player started itself holds the position as well."""
+        """A pause the player started itself holds the position it reports."""
         clock = self._clock(monkeypatch, 100.4)
         self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
-        await live_client._process_stat_stmp(b"")  # noqa: SLF001
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
         clock[0] = 108.0
         assert live_client.state == PlayerState.PAUSED
-        assert live_client.elapsed_milliseconds == 10_400
+        assert live_client.elapsed_milliseconds == 10_350
+
+    @pytest.mark.asyncio
+    async def test_the_pause_confirmation_sets_the_play_point(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The paused position the player reports is the play point's song position."""
+        self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        live_client._jiffies_epoch = 0.0  # noqa: SLF001
+        live_client.packet_latency = 0.0
+        await live_client.pause()
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        assert live_client.play_point == pytest.approx((200.0, 189.65, 10.35))
+
+    @pytest.mark.asyncio
+    async def test_a_pause_during_a_stream_switch_keeps_the_position_at_zero(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pause confirmation still reporting the flushed stream is not shown."""
+        self._clock(monkeypatch, 100.4)
+        await live_client.play_url(url=_TRACK_URL, autostart=False, send_flush=True)
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        assert live_client.elapsed_milliseconds == 0
 
     @pytest.mark.asyncio
     async def test_a_resume_made_on_the_player_restarts_the_clock(

@@ -1097,7 +1097,8 @@ class SlimClient:
     async def _process_stat_stmp(self, data: bytes) -> None:
         """Process incoming stat STMp message: Pause confirmed."""
         self.logger.debug("STMp received - pause confirmed.")
-        self._hold_elapsed()
+        # the player's own paused position, which a group resume aligns on
+        self._store_status(data)
         self._state = PlayerState.PAUSED
         self.signal_update()
         await self._render_display()
@@ -1131,6 +1132,13 @@ class SlimClient:
 
     def _process_stat_stmt(self, data: bytes, received: float) -> None:
         """Process incoming stat STMt message: heartbeat from client."""
+        self._store_status(data)
+        self._last_timestamp = self._jiffies_timestamp
+        self.track_jiffies_epoch(self._jiffies, received)
+        self.callback(self, EventType.PLAYER_HEARTBEAT)
+
+    def _store_status(self, data: bytes) -> None:
+        """Store the player clock and song position reported in a STAT message."""
         (
             _num_crlf,
             _mas_initialized,
@@ -1149,11 +1157,8 @@ class SlimClient:
             _server_heartbeat,
         ) = struct.unpack("!BBBLLLLHLLLLHLL", data[:47])
 
-        now = time.time()
         self._jiffies = jiffies
-        self._jiffies_timestamp = now
-        self._last_timestamp = now
-        self.track_jiffies_epoch(jiffies, received)
+        self._jiffies_timestamp = time.time()
         if self._awaiting_stream_start:
             # trailing heartbeat of the flushed stream: keep elapsed at 0 until the
             # new stream starts (STMs), so we don't surface the old position
@@ -1162,7 +1167,6 @@ class SlimClient:
         else:
             self._elapsed_milliseconds = elapsed_milliseconds
             self._elapsed_seconds = elapsed_seconds
-        self.callback(self, EventType.PLAYER_HEARTBEAT)
 
     async def _process_stat_stmu(self, data: bytes) -> None:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
