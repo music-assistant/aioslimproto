@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from .const import DEFAULT_MIN_SYNC_ADJUST, HARDWARE_MIN_SYNC_ADJUST
 
@@ -268,6 +268,10 @@ class MediaMetadata(TypedDict):
     title: str  # optional
     image_url: str  # optional
     duration: int  # optional
+    type: str  # optional
+    bitrate: str  # optional
+    samplerate: str  # optional
+    samplesize: str  # optional
 
 
 @dataclass
@@ -328,6 +332,7 @@ class CometDResponse(TypedDict):
     channel: str
     id: str
     data: dict[str, Any]
+    ext: NotRequired[dict[str, Any]]
 
 
 class SlimSubscribeData(CometDResponse):
@@ -386,6 +391,7 @@ PlaylistItem = TypedDict(
         "remote": int,
         "remote_title": str,
         "artwork_url": str,
+        "type": str,
         "bitrate": str,
         "samplerate": str,
         "samplesize": str,

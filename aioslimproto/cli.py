@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import inspect
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 import urllib.parse
 from uuid import uuid1
 
@@ -89,6 +89,10 @@ class SlimCLICommand:
 SlimCLICommandHandler = Callable[
     [SlimCLICommand], SlimCLICommandResponse | Awaitable[SlimCLICommandResponse]
 ]
+# An aiohttp handler for a route a consuming application adds to the CLI web server
+SlimRouteHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+# The paths the CLI web server answers itself; an application's routes cannot take them over
+BUILTIN_ROUTES = ("/jsonrpc.js", "/cometd")
 
 
 @dataclass
@@ -156,6 +160,9 @@ class SlimProtoCLI:
     _periodic_task: asyncio.Task | None = None
     _cli_server: asyncio.Server | None = None
     command_handler: SlimCLICommandHandler | None = None
+    # Optional hook returning the name to report for a player_id, or None to use
+    # the device-reported player.name. Set by the consuming application.
+    display_name_lookup: Callable[[str], str | None] | None = None
 
     def __init__(
         self,
@@ -163,17 +170,27 @@ class SlimProtoCLI:
         cli_port: int | None = None,
         cli_port_json: int | None = 0,
         command_handler: SlimCLICommandHandler | None = None,
+        extra_routes: dict[str, SlimRouteHandler] | None = None,
     ) -> None:
         """
         Initialize Telnet and/or Json interface CLI.
 
         Set port to None to disable the interface, set to 0 for auto select a free port.
+        extra_routes ({path: handler}) are added to the JSON-RPC web server, next to
+        /jsonrpc.js and /cometd, and answer GET and HEAD requests only (ignored when
+        cli_port_json is None, as there is no web server).
         """
+        for path in extra_routes or {}:
+            if path in BUILTIN_ROUTES:
+                raise ValueError(  # noqa: TRY003
+                    f"extra_routes cannot replace the built-in route {path}"
+                )
         self.server = server
         self.cli_port = cli_port
         self.cli_port_json = cli_port_json
         self.logger = server.logger.getChild("cli")
         self.command_handler = command_handler
+        self.extra_routes = extra_routes or {}
         self._cometd_clients: dict[str, CometDClient] = {}
         self._player_map: dict[str, str] = {}
         self._apprunner: web.AppRunner | None = None
@@ -212,6 +229,8 @@ class SlimProtoCLI:
                 self._handle_jsonrpc_client,
             )
             self._webapp.router.add_route("*", "/cometd", self._handle_cometd_client)
+            for path, handler in self.extra_routes.items():
+                self._webapp.router.add_get(path, handler)
             await self._apprunner.setup()
             # set host to None to bind to all addresses on both IPv4 and IPv6
             self._tcp_site = web.TCPSite(
@@ -312,7 +331,7 @@ class SlimProtoCLI:
                 await writer.drain()
         except ConnectionResetError:
             pass
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             self.logger.debug("Error handling CLI command", exc_info=err)
         finally:
             self.logger.debug("Client disconnected from Telnet CLI")
@@ -438,6 +457,7 @@ class SlimProtoCLI:
         clientid: str = ""
         response = []
         streaming = False
+        long_poll = False
         json_msg: list[dict[str, Any]] = await request.json()
         # cometd message is an array of commands/messages
         for cometd_msg in json_msg:
@@ -457,6 +477,21 @@ class SlimProtoCLI:
             elif not clientid and channel == "/slim/unsubscribe":
                 # pull clientId out of unsubscribe
                 clientid = cometd_msg["data"]["unsubscribe"].split("/")[1]
+                if clientid not in self._cometd_clients:
+                    # The unsubscribe names a session the server already dropped, so there
+                    # is nothing to remove. Replying "invalid clientId" would make the
+                    # client handshake and resend the same stale unsubscribe, forever.
+                    response.append(
+                        {
+                            "id": cometd_msg.get("id", ""),
+                            "channel": channel,
+                            "clientId": clientid,
+                            "successful": True,
+                        },
+                    )
+                    # Other messages in this request belong to the client's new session.
+                    clientid = ""
+                    continue
             assert clientid, "No clientID provided"
             logger.debug(
                 "Incoming message for channel '%s' - clientid: %s",
@@ -525,6 +560,7 @@ class SlimProtoCLI:
                 # (re)connect message
                 logger.debug("Client (re-)connected: %s", clientid)
                 streaming = cometd_msg["connectionType"] == "streaming"
+                long_poll = not streaming
                 cometd_client.streaming = streaming
                 # confirm the connection
                 response.append(
@@ -676,6 +712,9 @@ class SlimProtoCLI:
                         "successful": True,
                     },
                 )
+        if not clientid:
+            # Only stale unsubscribes were sent, there is no session to drain
+            return web.json_response(response)
         # append any remaining messages from the queue
         while True:
             try:
@@ -692,9 +731,9 @@ class SlimProtoCLI:
             "Connection": "keep-alive",
         }
         if not streaming:
-            # Long-polling mode: if we don't already have queued data messages,
+            # Long-polling connect: if we don't already have queued data messages,
             # hold the connection open until a message arrives or timeout (30s).
-            if not any(
+            if long_poll and not any(
                 msg for msg in response if msg.get("channel", "").startswith("/slim/")
             ):
                 try:
@@ -776,7 +815,7 @@ class SlimProtoCLI:
                     )
             except asyncio.CancelledError:
                 pass  # Task was cancelled, clean exit
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 self.logger.debug(
                     "Error handling CometD request: %s",
                     err,
@@ -819,6 +858,14 @@ class SlimProtoCLI:
         # individual values are returned with underscore ?!
         return {f"_{command}": cmd_result}
 
+    def _display_name(self, player: SlimClient) -> str:
+        """Return the name to report for a player, preferring display_name_lookup."""
+        if self.display_name_lookup is not None:
+            name = self.display_name_lookup(player.player_id)
+            if name:
+                return name
+        return player.name
+
     def _handle_players(
         self,
         player_id: str,
@@ -836,7 +883,9 @@ class SlimProtoCLI:
                 continue
             if len(players) >= limit:
                 break
-            players.append(create_player_item(index, player))
+            item = create_player_item(index, player)
+            item["name"] = self._display_name(player)
+            players.append(item)
         return PlayersResponse(count=len(players), players_loop=players)
 
     async def _handle_status(
@@ -860,36 +909,51 @@ class SlimProtoCLI:
             playlist_items.append(player.next_media)
         # base details
         result = {
-            "player_name": player.name,
+            "player_name": self._display_name(player),
             "player_connected": int(player.connected),
             "player_needs_upgrade": 0,
             "player_is_upgrading": 0,
             "power": int(player.powered),
             "signalstrength": 0,
-            "waitingToPlay": 0,
+            # Only send waitingToPlay during buffering (as 1: the client treats 0 as true)
+            **(
+                {"waitingToPlay": 1}
+                if player.state in (PlayerState.BUFFERING, PlayerState.BUFFER_READY)
+                else {}
+            ),
         }
         cur_item = playlist_items[0] if playlist_items else None
-        # additional details if player powered
-        if player.powered:
-            result = {
-                **result,
-                "mode": PLAYMODE_MAP[player.state],
-                "remote": 1,
-                "current_title": self.server.name,
-                "time": int(player.elapsed_seconds),
-                "duration": cur_item.metadata.get("duration", 0) if cur_item else 0,
-                "sync_master": "",
-                "sync_slaves": "",
-                "mixer volume": player.volume_level,
-                "player_ip": player.device_address,
-                "playlist_cur_index": 0,
-                "playlist_tracks": len(playlist_items),
-                "playlist_loop": [
+        # Like LMS's statusQuery, nothing here is gated on the power state: power is just
+        # another reported field. mode and playlist_tracks are always sent, and the
+        # song-related fields depend on whether a song is loaded. Gating on power hid the
+        # whole queue from the client's playlist screen after a server boot.
+        result = {
+            **result,
+            "mode": PLAYMODE_MAP[player.state],
+            **(
+                {
+                    "remote": 1,
+                    "current_title": self.server.name,
+                    "time": int(player.elapsed_seconds),
+                    "duration": cur_item.metadata.get("duration", 0),
+                }
+                if cur_item
+                else {}
+            ),
+            "sync_master": "",
+            "sync_slaves": "",
+            "mixer volume": player.volume_level,
+            "player_ip": player.device_address,
+            **({"playlist_cur_index": 0} if playlist_items else {}),
+            "playlist_tracks": len(playlist_items),
+            "playlist_loop": [
+                _drop_empty_quality_fields(
                     playlist_item_from_media_details(index, item)
-                    for index, item in enumerate(playlist_items)
-                ],
-                **player.extra_data,
-            }
+                )
+                for index, item in enumerate(playlist_items)
+            ],
+            **player.extra_data,
+        }
 
         # additional details if menu requested
         if menu == "menu":
@@ -930,14 +994,16 @@ class SlimProtoCLI:
                 },
                 "preset_loop": preset_loop,
                 "preset_data": preset_data,
-                "item_loop": [
-                    menu_item_from_media_details(
-                        item,
-                    )
-                    for item in (player.current_media, player.next_media)
-                    if item
-                ],
             }
+            # LMS only adds item_loop when the playlist has songs (statusQuery in
+            # Slim/Control/Queries.pm), and clients read item_loop[1] as soon as the
+            # key is there
+            if item_loop := [
+                menu_item_from_media_details(item)
+                for item in (player.current_media, player.next_media)
+                if item
+            ]:
+                result["item_loop"] = item_loop
         # additional details if contextmenu requested
         if bool(useContextMenu):
             result = {
@@ -966,7 +1032,9 @@ class SlimProtoCLI:
                 continue
             if len(players) > limit:
                 break
-            players.append(create_player_item(start_index + index, player))
+            item = create_player_item(start_index + index, player)
+            item["name"] = self._display_name(player)
+            players.append(item)
         return ServerStatusResponse(
             {
                 "httpport": self.cli_port_json,
@@ -1159,7 +1227,7 @@ class SlimProtoCLI:
             return
         if subcommand.startswith("preset_") and subcommand.endswith(".single"):
             # only handle http-based presets, ignore/forward all other
-            preset_id = subcommand.split("preset_")[1].split(".")[0]
+            preset_id = subcommand.split("preset_")[1].split(".", maxsplit=1)[0]
             preset_index = int(preset_id) - 1
             if len(player.presets) >= preset_index + 1:
                 preset = player.presets[preset_index]
@@ -1344,6 +1412,65 @@ class SlimProtoCLI:
                     },
                 )
 
+    def push_show_briefly(
+        self,
+        player_id: str,
+        text: list[str],
+        style: str | None = None,
+        icon_id: str | None = None,
+        duration_ms: int = 3000,
+        kind: Literal["mixed", "song"] = "mixed",
+    ) -> None:
+        """Push a "showBriefly" popup to a player's displaystatus subscription."""
+        # kind "mixed" is the "Adding ..." confirmation (text[0] label, text[1] title,
+        # with style and icon_id); "song" is "Now Playing" plus the title.
+        display: dict[str, Any] = {"type": kind, "text": text, "duration": duration_ms}
+        if style:
+            display["style"] = style
+        if icon_id:
+            display["icon-id"] = icon_id
+        self._push_displaystatus(player_id, display)
+
+    def push_play_icon(
+        self,
+        player_id: str,
+        text: list[str],
+        icon_id: str | None = None,
+    ) -> None:
+        """Push the icon-only "play" popup LMS sends when a track loads."""
+        # text is required even though it is never shown: the client formats it before
+        # it checks the popup type, and a missing one aborts the whole callback.
+        display: dict[str, Any] = {
+            "type": "icon",
+            "style": "play",
+            "play-mode": "play",
+            "is-remote": 0,
+            "text": text,
+        }
+        if icon_id:
+            display["icon-id"] = icon_id
+        self._push_displaystatus(player_id, display)
+
+    def _push_displaystatus(self, player_id: str, display: dict[str, Any]) -> None:
+        """Queue a displaystatus payload for a player's subscription, if it has one."""
+        # a reconnected client can leave an older session listed, so use the session
+        # that holds the subscription, not just the first one for the player
+        for client in self._cometd_clients.values():
+            sub = client.slim_subscriptions.get(
+                f"/{client.client_id}/slim/displaystatus/{player_id}",
+            )
+            if client.player_id != player_id or not sub:
+                continue
+            with suppress(asyncio.QueueFull):
+                client.queue.put_nowait(
+                    {
+                        "channel": sub["data"]["response"],
+                        "id": sub["id"],
+                        "data": {"display": display},
+                        "ext": {"priority": sub["data"].get("priority")},
+                    },
+                )
+
     async def _do_periodic(self) -> None:
         """Execute periodic sending of state and cleanup."""
         while True:
@@ -1476,10 +1603,29 @@ def playlist_item_from_media_details(index: int, media: MediaDetails) -> Playlis
         "artwork_url": media.metadata.get("image_url", ""),
         "coverid": "-187651250107376",
         "duration": media.metadata.get("duration", ""),
-        "bitrate": "",
-        "samplerate": "",
-        "samplesize": "",
+        "type": media.metadata.get("type", ""),
+        "bitrate": media.metadata.get("bitrate", ""),
+        "samplerate": media.metadata.get("samplerate", ""),
+        "samplesize": media.metadata.get("samplesize", ""),
     }
+
+
+def _drop_empty_quality_fields(item: PlaylistItem) -> PlaylistItem:
+    """Drop empty type/bitrate/samplerate/samplesize keys before they hit the wire.
+
+    Lua treats "" as true, so a client check like "if item.samplesize then" still
+    passes on an empty string and shows a stray "Hz • bits". Applied only where the
+    "status" response is assembled, not in playlist_item_from_media_details(): that is
+    a public function whose PlaylistItem type declares these keys as required.
+    """
+    return cast(
+        "PlaylistItem",
+        {
+            k: v
+            for k, v in item.items()
+            if k not in ("type", "bitrate", "samplerate", "samplesize") or v
+        },
+    )
 
 
 def create_player_item(playerindex: int, player: SlimClient) -> PlayerItem:

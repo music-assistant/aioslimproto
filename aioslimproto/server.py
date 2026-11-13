@@ -6,10 +6,11 @@ import asyncio
 from collections.abc import Callable
 import inspect
 import logging
+import sys
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
-from .cli import SlimProtoCLI
+from .cli import SlimProtoCLI, SlimRouteHandler
 from .client import SlimClient
 from .const import SLIMPROTO_PORT
 from .discovery import start_discovery
@@ -34,6 +35,7 @@ class SlimServer:
         name: str | None = None,
         control_port: int = SLIMPROTO_PORT,
         cli_command_handler: SlimCLICommandHandler | None = None,
+        extra_routes: dict[str, SlimRouteHandler] | None = None,
     ) -> None:
         """
         Initialize SlimServer instance.
@@ -49,13 +51,28 @@ class SlimServer:
           Note that only software clients can actually handle a non default control port.
         - cli_command_handler: Optional CLI command handler, e.g., to allow browsing the library.
           The handler can raise NotImplementedError for commands it doesn't support, then the fallback will be used.
+        - extra_routes: Optional dict of {path: handler} to register on the same internal
+          webapp as /cometd and /jsonrpc.js (e.g. for a consuming application's own icon/
+          artwork serving). Paths use aiohttp's syntax and the handlers answer GET and
+          HEAD requests only. They are registered in dict order; aiohttp tries paths with
+          {variables} in that order, so a catch-all path must come after the paths it
+          overlaps (a path without variables is always tried first). Must be passed here,
+          not added after start() - the router is frozen as part of starting and aiohttp
+          raises if you try to add routes after that. The routes need the JSON-RPC web
+          server (cli_port_json is not None), and a path of /jsonrpc.js or /cometd raises
+          ValueError. The web server listens on all interfaces without authentication: a
+          handler must check what it serves itself.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
         self.name = name or get_hostname()
         self.control_port = control_port
         self.cli = SlimProtoCLI(
-            self, cli_port, cli_port_json, command_handler=cli_command_handler
+            self,
+            cli_port,
+            cli_port_json,
+            command_handler=cli_command_handler,
+            extra_routes=extra_routes,
         )
         self._subscribers: list[EventSubscriptionType] = []
         self._server: asyncio.Server | None = None
@@ -93,6 +110,9 @@ class SlimServer:
 
     async def stop(self) -> None:
         """Stop running the server."""
+        # stop accepting connections first, players reconnect immediately
+        if self._server:
+            self._server.close()
         # Disconnect all clients and give them time to complete async cleanup
         for client in list(self._players.values()):
             client.disconnect()
@@ -100,7 +120,9 @@ class SlimServer:
         await asyncio.sleep(0.1)
         self._players = {}
         if self._server:
-            self._server.close()
+            if sys.version_info >= (3, 13):
+                # wait_closed() waits for every connection, also unregistered ones
+                self._server.close_clients()
             await self._server.wait_closed()
         if self._discovery:
             self._discovery.close()
@@ -175,10 +197,10 @@ class SlimServer:
             player_id = client.player_id
 
             if event_type == EventType.PLAYER_DISCONNECTED:
-                prev = self._players.pop(player_id, None)
-                if prev is None:
-                    # already cleaned up ?
+                # a socket that never got registered must not drop the one that did
+                if self._players.get(player_id) is not client:
                     return
+                del self._players[player_id]
 
             if event_type == EventType.PLAYER_CONNECTED:
                 if (existing := self._players.get(player_id)) and existing.connected:

@@ -2,17 +2,26 @@
 
 import asyncio
 from itertools import chain
+import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import quote
 
+import aiohttp
+from aiohttp import web
 import pytest
 
-from aioslimproto.cli import SlimProtoCLI
+from aioslimproto.cli import (
+    CometDClient,
+    SlimProtoCLI,
+    _drop_empty_quality_fields,
+    playlist_item_from_media_details,
+)
 from aioslimproto.client import SlimClient
-from aioslimproto.models import PlayerState
+from aioslimproto.models import MediaDetails, PlayerState
 from aioslimproto.server import SlimServer
 
 
@@ -70,6 +79,7 @@ def dummy_player() -> SlimClient:
             device_address="127.0.0.1",
             current_media=None,
             next_media=None,
+            presets=[],
             elapsed_seconds=0,
             volume_level=50,
             volume_set=AsyncMock(),
@@ -305,6 +315,65 @@ class TestStatusCommand:
         )
 
         assert response == expected_response
+
+
+class TestStatusMenuItemLoop:
+    """Tests for the item_loop of a status command with menu:menu."""
+
+    @staticmethod
+    async def _menu_status(player: SlimClient, server: SlimServer) -> dict:
+        """Return the menu-mode status of the player."""
+        cli = SlimProtoCLI(server)
+        return cast(
+            "dict",
+            await cli._handle_status(  # noqa: SLF001 # Accessing a protected member for testing purposes
+                player.player_id, "-", 2, menu="menu"
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_omitted_when_nothing_is_loaded(
+        self, dummy_player: SlimClient, dummy_server: SlimServer
+    ) -> None:
+        """Clients read item_loop[1] when it exists, so an empty one is omitted."""
+        status = await self._menu_status(dummy_player, dummy_server)
+
+        assert "item_loop" not in status
+        assert status["count"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("current", "following", "expected"),
+        [
+            ("Song", None, ["Song"]),
+            ("Song", "Next", ["Song", "Next"]),
+            (None, "Next", ["Next"]),
+        ],
+    )
+    async def test_lists_the_current_and_next_track(
+        self,
+        dummy_player: SlimClient,
+        dummy_server: SlimServer,
+        current: str | None,
+        following: str | None,
+        expected: list[str],
+    ) -> None:
+        """The loaded track and the one queued after it are listed."""
+
+        def media(title: str | None) -> MediaDetails | None:
+            if title is None:
+                return None
+            return MediaDetails(
+                url="http://host/stream.flac",
+                metadata={"title": title},  # type: ignore[typeddict-item]
+            )
+
+        dummy_player.current_media = media(current)
+        dummy_player.next_media = media(following)
+
+        status = await self._menu_status(dummy_player, dummy_server)
+
+        assert [item["text"] for item in status["item_loop"]] == expected
 
 
 class TestMixerVolumeCommand:
@@ -594,3 +663,663 @@ class TestCommandHandler:
         )
 
         assert response == encode_response("a5:41:d2:cd:cd:05", "mixer", "volume", "50")
+
+
+class TestCometDLongPollWait:
+    """Tests for to ensure handshake requests and no id slim don't queue."""
+
+    _MAX_ACCEPTABLE_SECONDS = 10  # well under the real 30s wait - if either
+    # fix regresses, this fails clearly with a real elapsed time, rather
+    # than the earlier (broken) version silently taking 30x longer and
+    # still passing.
+
+    @pytest.mark.asyncio
+    async def test_handshake_only_batch_responds_immediately(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A handshake-only batch must not hit the long-poll wait."""
+        cli = SlimProtoCLI(dummy_server)
+        request = Mock(
+            json=AsyncMock(return_value=[{"channel": "/meta/handshake", "id": "1"}])
+        )
+
+        start = time.monotonic()
+        resp = await cli._handle_cometd_client(request)  # noqa: SLF001
+        elapsed = time.monotonic() - start
+
+        assert resp.status == 200
+        assert elapsed < self._MAX_ACCEPTABLE_SECONDS, (
+            f"took {elapsed:.1f}s - hit the 30s long-poll wait, had_handshake regressed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_id_less_slim_request_responds_immediately(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """An id-less /slim/request must not hit the long-poll wait either."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+
+        handshake_request = Mock(
+            json=AsyncMock(return_value=[{"channel": "/meta/handshake", "id": "1"}])
+        )
+        handshake_resp = await cli._handle_cometd_client(handshake_request)  # noqa: SLF001
+        clientid = json.loads(handshake_resp.text)[0]["clientId"]
+
+        request = Mock(
+            json=AsyncMock(
+                return_value=[
+                    {
+                        "channel": "/slim/request",
+                        "data": {
+                            "request": [
+                                "",
+                                ["artworkspec", "add", "225x225_m", "test"],
+                            ],
+                            "response": f"/{clientid}/slim/request",
+                        },
+                    }
+                ]
+            )
+        )
+
+        start = time.monotonic()
+        resp = await cli._handle_cometd_client(request)  # noqa: SLF001
+        elapsed = time.monotonic() - start
+
+        assert resp.status == 200
+        assert elapsed < self._MAX_ACCEPTABLE_SECONDS, (
+            f"took {elapsed:.1f}s - hit the 30s long-poll wait."
+        )
+
+
+class TestDisplayName:
+    """Tests for the display_name_lookup hook used for player names."""
+
+    def test_uses_lookup_when_it_returns_a_name(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """A name from the lookup overrides the device-reported name."""
+        cli = SlimProtoCLI(dummy_server)
+        cli.display_name_lookup = lambda _player_id: "Renamed in app"
+
+        assert cli._display_name(dummy_player) == "Renamed in app"  # noqa: SLF001
+
+    def test_falls_back_when_lookup_returns_none(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Falls back to the device-reported name when the lookup has no answer."""
+        cli = SlimProtoCLI(dummy_server)
+        cli.display_name_lookup = lambda _player_id: None
+
+        assert cli._display_name(dummy_player) == dummy_player.name  # noqa: SLF001
+
+    def test_falls_back_without_lookup(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """With no lookup set, the device-reported name is used."""
+        cli = SlimProtoCLI(dummy_server)
+
+        assert cli._display_name(dummy_player) == dummy_player.name  # noqa: SLF001
+
+    def test_players_list_uses_lookup(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """The players list reports the looked-up name."""
+        cli = SlimProtoCLI(dummy_server)
+        cli.display_name_lookup = lambda _player_id: "Renamed in app"
+
+        response = cli._handle_players(dummy_player.player_id)  # noqa: SLF001
+
+        assert response["players_loop"][0]["name"] == "Renamed in app"
+
+
+class TestCometDStaleSession:
+    """Tests for requests that name a client session the server has already dropped."""
+
+    @staticmethod
+    async def _post(cli: SlimProtoCLI, messages: list[dict]) -> list[dict]:
+        request = Mock(json=AsyncMock(return_value=messages))
+        resp = await cli._handle_cometd_client(request)  # noqa: SLF001
+        return json.loads(resp.text)
+
+    @classmethod
+    async def _handshake(cls, cli: SlimProtoCLI) -> str:
+        return (await cls._post(cli, [{"channel": "/meta/handshake", "id": "1"}]))[0][
+            "clientId"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_for_dropped_session_succeeds(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A stale unsubscribe succeeds and does not take over the batch."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        # The server drops a session when its streaming connection ends or it goes idle.
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+        new_id = await self._handshake(cli)
+
+        # A reconnecting client unsubscribes the old session's channels and then
+        # subscribes on the new session in the same request.
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 7,
+                    "channel": "/slim/unsubscribe",
+                    "data": {"unsubscribe": f"/{old_id}/slim/menustatus/aa:bb"},
+                },
+                {
+                    "id": 8,
+                    "channel": "/slim/subscribe",
+                    "data": {
+                        "request": ["", ["serverstatus", 0, 50, "subscribe:60"]],
+                        "response": f"/{new_id}/slim/serverstatus",
+                    },
+                },
+            ],
+        )
+
+        assert response[0]["channel"] == "/slim/unsubscribe"
+        assert response[0]["successful"] is True
+        assert "advice" not in response[0]
+        # The subscribe was handled under the new session.
+        assert any(msg["channel"] == "/slim/subscribe" for msg in response)
+        assert (
+            f"/{new_id}/slim/serverstatus"
+            in cli._cometd_clients[new_id].slim_subscriptions  # noqa: SLF001
+        )
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_alone_for_dropped_session_succeeds(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A request with only a stale unsubscribe gets its reply straight away."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+
+        # Nothing follows the unsubscribe, so no session is left to drain a queue from.
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 7,
+                    "channel": "/slim/unsubscribe",
+                    "data": {"unsubscribe": f"/{old_id}/slim/menustatus/aa:bb"},
+                }
+            ],
+        )
+
+        assert len(response) == 1
+        assert response[0]["id"] == 7
+        assert response[0]["channel"] == "/slim/unsubscribe"
+        assert response[0]["clientId"] == old_id
+        assert response[0]["successful"] is True
+        assert "advice" not in response[0]
+        # The dropped session was not brought back, and no other one was made.
+        assert not cli._cometd_clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_other_requests_for_dropped_session_still_need_handshake(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """Only unsubscribe is forgiving; other channels still get invalid clientId."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=None))
+        old_id = await self._handshake(cli)
+        cli._cometd_clients.pop(old_id)  # noqa: SLF001
+
+        response = await self._post(
+            cli,
+            [
+                {
+                    "id": 9,
+                    "channel": "/slim/subscribe",
+                    "data": {
+                        "request": ["", ["serverstatus", 0, 50, "subscribe:60"]],
+                        "response": f"/{old_id}/slim/serverstatus",
+                    },
+                }
+            ],
+        )
+
+        assert response[0]["successful"] is False
+        assert response[0]["error"] == "invalid clientId"
+        assert response[0]["advice"]["reconnect"] == "handshake"
+
+
+class TestPlaylistItem:
+    """Tests for the codec and quality fields of a playlist item."""
+
+    @staticmethod
+    def _media(**metadata: str) -> MediaDetails:
+        return MediaDetails(
+            url="http://host/stream.flac",
+            metadata=metadata,  # type: ignore[arg-type]
+        )
+
+    def test_takes_the_codec_and_quality_from_the_metadata(self) -> None:
+        """The type, bitrate, samplerate and samplesize come from the metadata."""
+        item = playlist_item_from_media_details(
+            0,
+            self._media(
+                type="flac",
+                bitrate="912kbps",
+                samplerate="44100",
+                samplesize="16",
+            ),
+        )
+
+        assert item["type"] == "flac"
+        assert item["bitrate"] == "912kbps"
+        assert item["samplerate"] == "44100"
+        assert item["samplesize"] == "16"
+
+    def test_defaults_to_empty_strings_without_the_metadata(self) -> None:
+        """Metadata that omits the fields gives empty strings, not missing keys."""
+        item = playlist_item_from_media_details(0, self._media())
+
+        assert item["type"] == ""
+        assert item["bitrate"] == ""
+        assert item["samplerate"] == ""
+        assert item["samplesize"] == ""
+
+    @pytest.mark.asyncio
+    async def test_status_playlist_loop_carries_the_fields(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """A loaded track's codec and quality reach the status playlist_loop."""
+        dummy_player.current_media = self._media(
+            type="flac", bitrate="912kbps", samplerate="44100", samplesize="16"
+        )
+        cli = SlimProtoCLI(dummy_server)
+
+        status = await cli._handle_status(  # noqa: SLF001
+            dummy_player.player_id, "-", 2
+        )
+
+        assert status["playlist_loop"][0]["type"] == "flac"
+        assert status["playlist_loop"][0]["bitrate"] == "912kbps"
+
+
+class TestPushPopups:
+    """The popups pushed to a device's displaystatus subscription."""
+
+    @staticmethod
+    def _cli_with_subscription(
+        dummy_server: SlimServer, *, subscribed: bool = True
+    ) -> tuple[SlimProtoCLI, CometDClient]:
+        cli = SlimProtoCLI(dummy_server)
+        client = CometDClient(client_id="c1", player_id="a5:41:d2:cd:cd:05")
+        if subscribed:
+            client.slim_subscriptions["/c1/slim/displaystatus/a5:41:d2:cd:cd:05"] = {
+                "id": 11,
+                "data": {"response": "/c1/slim/displaystatus/a5:41:d2:cd:cd:05"},
+            }  # type: ignore[assignment]
+        cli._cometd_clients["c1"] = client  # noqa: SLF001
+        return cli, client
+
+    def test_a_mixed_popup_carries_the_text_style_and_icon(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """The confirmation popup has the label, the title, a badge and cover art."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        cli.push_show_briefly(
+            "a5:41:d2:cd:cd:05",
+            ["Adding", "A Song"],
+            style="add",
+            icon_id="42",
+            duration_ms=2500,
+        )
+        message = client.queue.get_nowait()
+        assert message["channel"] == "/c1/slim/displaystatus/a5:41:d2:cd:cd:05"
+        assert message["id"] == 11
+        assert message["data"]["display"] == {
+            "type": "mixed",
+            "text": ["Adding", "A Song"],
+            "duration": 2500,
+            "style": "add",
+            "icon-id": "42",
+        }
+
+    def test_the_optional_parts_are_left_out_when_not_given(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """No style and no icon id mean neither key is sent."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        cli.push_show_briefly(
+            "a5:41:d2:cd:cd:05", ["Now Playing", "A Song"], kind="song"
+        )
+        display = client.queue.get_nowait()["data"]["display"]
+        assert display["type"] == "song"
+        assert "style" not in display
+        assert "icon-id" not in display
+
+    def test_the_play_icon_popup_always_has_text(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """The client fails on a missing text even though it never shows it."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        cli.push_play_icon("a5:41:d2:cd:cd:05", ["A Song"], icon_id="42")
+        display = client.queue.get_nowait()["data"]["display"]
+        assert display == {
+            "type": "icon",
+            "style": "play",
+            "play-mode": "play",
+            "is-remote": 0,
+            "text": ["A Song"],
+            "icon-id": "42",
+        }
+
+    def test_nothing_is_queued_without_a_session_or_a_subscription(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A device that is not listening for popups is not an error."""
+        cli, client = self._cli_with_subscription(dummy_server, subscribed=False)
+        cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
+        assert client.queue.empty()
+        cli.push_show_briefly("someone-else", ["Adding", "A Song"])
+        assert client.queue.empty()
+
+    def test_a_session_with_the_subscription_gets_the_popup_not_an_older_one(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """A reconnect can leave an older session listed first for the same player."""
+        cli, newer = self._cli_with_subscription(dummy_server)
+        older = CometDClient(client_id="c0", player_id="a5:41:d2:cd:cd:05")
+        cli._cometd_clients = {"c0": older, **cli._cometd_clients}  # noqa: SLF001
+        cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
+        assert older.queue.empty()
+        assert newer.queue.get_nowait()["data"]["display"]["text"] == [
+            "Adding",
+            "A Song",
+        ]
+
+    def test_a_full_queue_drops_the_popup_without_failing(
+        self, dummy_server: SlimServer
+    ) -> None:
+        """The popup is a courtesy, so a backlog on the connection never raises."""
+        cli, client = self._cli_with_subscription(dummy_server)
+        for _ in range(client.queue.maxsize):
+            client.queue.put_nowait({"channel": "x", "id": 0, "data": {}})  # type: ignore[typeddict-item]
+        cli.push_show_briefly("a5:41:d2:cd:cd:05", ["Adding", "A Song"])
+        assert client.queue.full()
+
+
+class TestStatusShape:
+    """Tests for which fields the status reply carries, and when."""
+
+    @staticmethod
+    def _media(**metadata: str | int) -> MediaDetails:
+        return MediaDetails(
+            url="http://host/stream.flac",
+            metadata=metadata,  # type: ignore[arg-type]
+        )
+
+    @staticmethod
+    async def _status(server: SlimServer, player: SlimClient) -> dict:
+        cli = SlimProtoCLI(server)
+        return cast(
+            "dict",
+            await cli._handle_status(player.player_id, "-", 2),  # noqa: SLF001
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", [PlayerState.BUFFERING, PlayerState.BUFFER_READY])
+    async def test_waiting_to_play_is_sent_while_buffering(
+        self,
+        dummy_server: SlimServer,
+        dummy_player: SlimClient,
+        state: PlayerState,
+    ) -> None:
+        """The position stands still while buffering, so the client must wait."""
+        dummy_player.state = state
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["mode"] == "play"
+        assert status["waitingToPlay"] == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "state", [PlayerState.PLAYING, PlayerState.PAUSED, PlayerState.STOPPED]
+    )
+    async def test_waiting_to_play_is_left_out_otherwise(
+        self,
+        dummy_server: SlimServer,
+        dummy_player: SlimClient,
+        state: PlayerState,
+    ) -> None:
+        """The client treats a sent 0 as true, so the key is left out otherwise."""
+        dummy_player.state = state
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert "waitingToPlay" not in status
+
+    @pytest.mark.asyncio
+    async def test_mode_and_queue_are_sent_when_the_player_is_powered_off(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Power is one more reported field, so it does not hide the queue."""
+        dummy_player.powered = False
+        dummy_player.current_media = self._media(title="Song", duration=200)
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["power"] == 0
+        assert status["mode"] == "stop"
+        assert status["playlist_tracks"] == 1
+        assert status["playlist_loop"][0]["title"] == "Song"
+
+    @pytest.mark.asyncio
+    async def test_nothing_loaded_sends_no_song_fields(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """With nothing in the queue there is no track, position or index."""
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["playlist_tracks"] == 0
+        assert status["playlist_loop"] == []
+        for key in ("time", "duration", "remote", "playlist_cur_index"):
+            assert key not in status
+
+    @pytest.mark.asyncio
+    async def test_a_loaded_track_sends_its_position_and_duration(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """A loaded track has a position, a duration and an index."""
+        dummy_player.current_media = self._media(title="Song", duration=200)
+        dummy_player.elapsed_seconds = 12.7
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["time"] == 12
+        assert status["duration"] == 200
+        assert status["playlist_cur_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_quality_fields_are_left_out_of_the_playlist_loop(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """An empty string is true to the client, so only filled quality keys go out."""
+        dummy_player.current_media = self._media(title="Song", type="flac")
+
+        status = await self._status(dummy_server, dummy_player)
+
+        item = status["playlist_loop"][0]
+        assert item["type"] == "flac"
+        for key in ("bitrate", "samplerate", "samplesize"):
+            assert key not in item
+
+    @pytest.mark.asyncio
+    async def test_extra_data_is_merged_into_the_reply(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """The host's extra_data keys reach the client whatever the power state."""
+        dummy_player.powered = False
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["uuid"] == "player-uuid-1"
+        assert status["seq_no"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_next_track_alone_still_has_a_queue(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """With only a next track, the queue lists it and the song fields follow it."""
+        dummy_player.next_media = self._media(title="Next", duration=90)
+
+        status = await self._status(dummy_server, dummy_player)
+
+        assert status["playlist_tracks"] == 1
+        assert status["playlist_loop"][0]["title"] == "Next"
+        assert status["duration"] == 90
+        assert status["playlist_cur_index"] == 0
+
+
+class TestDropEmptyQualityFields:
+    """The helper that trims a playlist item for the wire."""
+
+    def test_only_empty_quality_fields_are_dropped(self) -> None:
+        """Other empty fields stay; filled quality fields stay."""
+        item = playlist_item_from_media_details(
+            0,
+            MediaDetails(
+                url="http://host/stream.flac",
+                metadata={"title": "Song", "type": "flac", "samplerate": "96000"},  # type: ignore[typeddict-item]
+            ),
+        )
+
+        trimmed = _drop_empty_quality_fields(item)
+
+        assert trimmed["type"] == "flac"
+        assert trimmed["samplerate"] == "96000"
+        assert "bitrate" not in trimmed
+        assert "samplesize" not in trimmed
+        assert trimmed["artist"] == ""
+        assert trimmed["title"] == "Song"
+
+
+class TestExtraRoutes:
+    """Routes the consuming application adds to the CLI's own web server."""
+
+    @staticmethod
+    async def _started(routes: dict) -> SlimServer:
+        """Start a server whose CLI web server (only) runs on a free port."""
+        server = SlimServer(
+            ip_address="127.0.0.1",
+            name="test",
+            cli_port=None,
+            cli_port_json=0,
+            extra_routes=routes,
+        )
+        await server.cli.start()
+        return server
+
+    async def test_a_route_of_the_application_is_served(self) -> None:
+        """A GET reaches the handler, and a HEAD gets the same answer without a body."""
+
+        async def cover(request: web.Request) -> web.Response:
+            return web.Response(text=f"cover {request.match_info['id']}")
+
+        server = await self._started({"/music/{id}/cover": cover})
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{base}/music/7/cover") as response:
+                    assert (response.status, await response.text()) == (
+                        200,
+                        "cover 7",
+                    )
+                async with session.head(f"{base}/music/7/cover") as response:
+                    assert (response.status, await response.read()) == (200, b"")
+        finally:
+            await server.cli.stop()
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+    async def test_a_route_of_the_application_only_answers_get_and_head(
+        self, method: str
+    ) -> None:
+        """Other methods are refused before they reach the handler."""
+        calls = []
+
+        async def cover(_request: web.Request) -> web.Response:
+            calls.append(1)
+            return web.Response(text="cover")
+
+        server = await self._started({"/cover": cover})
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            async with (
+                aiohttp.ClientSession() as session,
+                session.request(method, f"{base}/cover") as response,
+            ):
+                assert response.status == 405
+            assert not calls
+        finally:
+            await server.cli.stop()
+
+    async def test_the_routes_are_matched_in_the_order_given(self) -> None:
+        """Of two paths with variables that both match, the one listed first answers."""
+
+        async def numbers(_request: web.Request) -> web.Response:
+            return web.Response(text="numbers")
+
+        async def catch_all(_request: web.Request) -> web.Response:
+            return web.Response(text="catch-all")
+
+        server = await self._started(
+            {r"/files/{number:\d+}": numbers, "/files/{tail:.*}": catch_all}
+        )
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{base}/files/12") as response:
+                    assert await response.text() == "numbers"
+                async with session.get(f"{base}/files/other") as response:
+                    assert await response.text() == "catch-all"
+        finally:
+            await server.cli.stop()
+
+    async def test_the_built_in_routes_still_work(self) -> None:
+        """Adding routes leaves /jsonrpc.js and /cometd alone."""
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="extra")
+
+        server = await self._started({"/extra": handler})
+        try:
+            base = f"http://127.0.0.1:{server.cli.cli_port_json}"
+            request = {
+                "id": 1,
+                "method": "slim.request",
+                "params": ["-", ["players", 0, 9]],
+            }
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(f"{base}/jsonrpc.js", json=request) as response,
+            ):
+                assert response.status == 200
+                assert (await response.json())["result"]["count"] == 0
+        finally:
+            await server.cli.stop()
+
+    @pytest.mark.parametrize("path", ["/jsonrpc.js", "/cometd"])
+    def test_a_built_in_route_cannot_be_replaced(
+        self, dummy_server: SlimServer, path: str
+    ) -> None:
+        """Asking for one of the CLI's own paths fails at once, not when it starts."""
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="extra")
+
+        with pytest.raises(ValueError, match="built-in route"):
+            SlimProtoCLI(dummy_server, extra_routes={path: handler})
+        with pytest.raises(ValueError, match="built-in route"):
+            SlimServer(ip_address="127.0.0.1", name="t", extra_routes={path: handler})
+
+    def test_without_routes_there_are_none(self, dummy_server: SlimServer) -> None:
+        """The default is no extra routes."""
+        assert SlimProtoCLI(dummy_server).extra_routes == {}

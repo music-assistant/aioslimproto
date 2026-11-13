@@ -2,12 +2,13 @@
 
 import asyncio
 import struct
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
 from aioslimproto.client import SlimClient
-from aioslimproto.models import MediaDetails, PlayerState
+from aioslimproto.models import EventType, MediaDetails, PlayerState
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
@@ -397,7 +398,11 @@ class TestRedirect:
     ) -> None:
         """The new stream keeps the details and start mode it was requested with."""
         media = MediaDetails(
-            url=_TRACK_URL, mime_type="audio/wav", metadata={"title": "Track"}
+            url=_TRACK_URL,
+            mime_type="audio/wav",
+            metadata={"title": "Track"},
+            stream_threshold=100,
+            output_threshold=5,
         )
         client._buffering_media = media  # noqa: SLF001
         client._auto_play = autostart  # noqa: SLF001
@@ -412,5 +417,327 @@ class TestRedirect:
             media.metadata,
             media.transition,
             media.transition_duration,
+            stream_threshold=media.stream_threshold,
+            output_threshold=media.output_threshold,
             autostart=autostart,
         )
+
+
+def _stmt_payload(jiffies: int) -> bytes:
+    """Build an STMt STAT payload with the given player clock."""
+    return b"STMt" + struct.pack(
+        "!BBBLLLLHLLLLHLL", 0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, 0, 0, 0, 0
+    )
+
+
+class TestJiffies:
+    """jiffies follows the player clock from its last STMt, whatever the stream does."""
+
+    @pytest.fixture
+    def now(self, monkeypatch: pytest.MonkeyPatch) -> list[float]:
+        """Freeze the client's clock; bump now[0] to let time pass."""
+        clock = [1_000_000.0]
+        monkeypatch.setattr("aioslimproto.client.time", Mock(time=lambda: clock[0]))
+        return clock
+
+    @pytest.mark.asyncio
+    async def test_flush_keeps_player_clock(
+        self, live_client: SlimClient, now: list[float]
+    ) -> None:
+        """A flush (new track or seek) doesn't move the player clock."""
+        await live_client._process_stat(_stmt_payload(40_000))  # noqa: SLF001
+        now[0] += 0.5
+        await live_client.play_url(url=_TRACK_URL, autostart=False, send_flush=True)
+        now[0] += 0.25
+
+        assert live_client.jiffies == 40_750
+
+    @pytest.mark.asyncio
+    async def test_stream_start_keeps_player_clock(
+        self, live_client: SlimClient, now: list[float]
+    ) -> None:
+        """A stream start (STMs) doesn't move the player clock."""
+        await live_client._process_stat(_stmt_payload(40_000))  # noqa: SLF001
+        now[0] += 0.8
+        await live_client._process_stat(b"STMs" + bytes(47))  # noqa: SLF001
+        now[0] += 0.1
+
+        assert live_client.jiffies == 40_900
+
+
+class TestByeCommand:
+    """A BYE! packet must disconnect the client just like reaching EOF does."""
+
+    @pytest.mark.asyncio
+    async def test_bye_disconnects_without_eof(self, writer: Mock) -> None:
+        """BYE! must end the read loop and disconnect, with no socket EOF."""
+        reader = asyncio.StreamReader()
+        disconnected = asyncio.Event()
+
+        def callback(_client: SlimClient, event: EventType, *_args: object) -> None:
+            if event is EventType.PLAYER_DISCONNECTED:
+                disconnected.set()
+
+        slim_client = SlimClient(reader, writer, callback)
+        slim_client._connected = True  # noqa: SLF001
+
+        # real players always send a 1-byte reason (0x00 normal, 0x01 upgrade)
+        reader.feed_data(_frame(b"BYE!", b"\x00"))
+
+        await asyncio.wait_for(disconnected.wait(), 1)
+        await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
+
+        assert slim_client.connected is False
+
+
+class TestSendToLostConnection:
+    """A send that finds the socket gone must still report the disconnect."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lost", ["eof", "closing", "fails_on_drain"])
+    async def test_send_before_reader_notices_signals_disconnect(
+        self, writer: Mock, lost: str
+    ) -> None:
+        """The player is reported disconnected when a send sees the loss first."""
+        reader = asyncio.StreamReader()
+        callback = Mock()
+        slim_client = SlimClient(reader, writer, callback)
+        slim_client._connected = True  # noqa: SLF001
+        # the transport hands the loss to the reader before the reader task runs;
+        # a failed write reaches it as a broken pipe
+        if lost == "eof":
+            reader.feed_eof()
+        else:
+            reader.set_exception(BrokenPipeError())
+        if lost == "closing":
+            writer.is_closing.return_value = True
+        if lost == "fails_on_drain":
+            writer.drain.side_effect = BrokenPipeError()
+
+        await slim_client.send_frame(b"vers", b"7.9")
+        await asyncio.wait([slim_client._reader_task], timeout=1)  # noqa: SLF001
+
+        assert slim_client.connected is False
+        assert call(slim_client, EventType.PLAYER_DISCONNECTED) in callback.mock_calls
+        writer.close.assert_called()
+
+
+class TestRestoreOnHelo:
+    """A connecting player gets its volume and power state, even when unchanged."""
+
+    _HELO = bytes([12, 0]) + b"\xaa\xbb\xcc\xdd\xee\xff" + bytes(28)
+
+    async def _connect(self, client: SlimClient, command: bytes) -> list[bytes]:
+        """Process a squeezelite HELO; return the payloads sent for command."""
+        client.send_frame = AsyncMock()
+        await client._process_helo(self._HELO + b"Model=squeezelite,flc")  # noqa: SLF001
+        client.disconnect()
+        return [
+            frame.args[1]
+            for frame in client.send_frame.await_args_list
+            if frame.args[0] == command
+        ]
+
+    @pytest.mark.asyncio
+    async def test_helo_sends_default_volume(self, client: SlimClient) -> None:
+        """Skipping the unchanged default level must not leave the player silent."""
+        audg_payloads = await self._connect(client, b"audg")
+
+        assert len(audg_payloads) == 1
+        new_gain = client.volume_control.new_gain()
+        assert struct.unpack("!LLBBLL", audg_payloads[0])[4:] == (new_gain, new_gain)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("powered", [True, False])
+    async def test_helo_sends_power_state(
+        self, client: SlimClient, *, powered: bool
+    ) -> None:
+        """The player gets the cached power state, which power() would skip."""
+        client._powered = powered  # noqa: SLF001
+        aude_payloads = await self._connect(client, b"aude")
+
+        assert aude_payloads == [struct.pack("2B", int(powered), 1)]
+
+
+class TestSetdPlayerName:
+    """SETD 0 carries the player name, with or without a NUL terminator."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (b"\x00Kitchen\x00", "Kitchen"),  # squeezelite, SqueezeESP32
+            (b"\x00Kitchen", "Kitchen"),  # SqueezePlay (Radio/Touch/Controller)
+            (b"\x00Kitchen\x00\xff\xff", "Kitchen"),
+            (b"\x00K\xfcche\x00", "K�che"),
+        ],
+    )
+    async def test_name_is_parsed(
+        self, client: SlimClient, payload: bytes, expected: str
+    ) -> None:
+        """The name ends at the first NUL, or at the end of the payload."""
+        client._process_setd(payload)  # noqa: SLF001
+
+        assert client.name == expected
+        client.callback.assert_called_with(
+            client, EventType.PLAYER_NAME_RECEIVED, expected
+        )
+
+
+class TestSocketReader:
+    """The socket reader handles every complete packet it has buffered."""
+
+    @staticmethod
+    async def _read(writer: Mock, data: bytes) -> list[bytes]:
+        """Feed data followed by EOF and return the DSCO payloads that were handled."""
+        reader = asyncio.StreamReader()
+        slim_client = SlimClient(reader, writer, Mock())
+        handled: list[bytes] = []
+        slim_client._process_dsco = handled.append  # noqa: SLF001
+        reader.feed_data(data)
+        reader.feed_eof()
+        await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
+        await asyncio.sleep(0)
+        return handled
+
+    @pytest.mark.asyncio
+    async def test_packets_from_one_read_are_all_handled_in_order(
+        self, writer: Mock
+    ) -> None:
+        """Several packets arriving together are all handled, in arrival order."""
+        payloads = [bytes([i]) for i in range(30)]
+
+        handled = await self._read(
+            writer, b"".join(_frame(b"DSCO", p) for p in payloads)
+        )
+
+        assert handled == payloads
+
+    @pytest.mark.asyncio
+    async def test_packet_without_payload_is_handled(self, writer: Mock) -> None:
+        """A packet that consists of only its header is handled too."""
+        handled = await self._read(writer, _frame(b"DSCO", b""))
+
+        assert handled == [b""]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bye", [_frame(b"BYE!", b""), None])
+    async def test_helo_followed_by_disconnect_does_not_connect(
+        self, writer: Mock, bye: bytes | None
+    ) -> None:
+        """A player that is gone right after hello is not reported connected."""
+        reader = asyncio.StreamReader()
+        callback = Mock()
+        slim_client = SlimClient(reader, writer, callback)
+        reader.feed_data(_frame(b"HELO", bytes([12, 0]) + bytes(6)))
+        if bye:
+            reader.feed_data(bye)
+        else:
+            reader.feed_eof()
+
+        await asyncio.wait_for(slim_client._reader_task, 1)  # noqa: SLF001
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert not slim_client.connected
+        assert call(slim_client, EventType.PLAYER_CONNECTED) not in callback.mock_calls
+
+
+class TestPositionAcrossPauseAndResume:
+    """The position neither steps back at a pause nor jumps forward at a resume."""
+
+    @staticmethod
+    def _clock(monkeypatch: pytest.MonkeyPatch, now: float) -> list[float]:
+        clock = [now]
+        # only the client module sees the fake clock, not the rest of the process
+        monkeypatch.setattr(
+            "aioslimproto.client.time", SimpleNamespace(time=lambda: clock[0])
+        )
+        return clock
+
+    @staticmethod
+    def _playing(client: SlimClient, *, elapsed_ms: int, reported_at: float) -> None:
+        client._state = PlayerState.PLAYING  # noqa: SLF001
+        client._elapsed_milliseconds = elapsed_ms  # noqa: SLF001
+        client._last_timestamp = reported_at  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_pausing_keeps_the_position_reached_and_it_stays_put(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seven tenths of a second after the last report, the pause holds it."""
+        clock = self._clock(monkeypatch, 100.7)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        await live_client.pause()
+        assert live_client.state == PlayerState.PAUSED
+        assert live_client.elapsed_milliseconds == 10_700
+        clock[0] = 105.0
+        assert live_client.elapsed_milliseconds == 10_700
+
+    @pytest.mark.asyncio
+    async def test_resuming_counts_on_from_the_resume_not_from_before_the_pause(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a three second pause the position has not moved when play starts."""
+        clock = self._clock(monkeypatch, 103.0)
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        live_client._elapsed_milliseconds = 10_700  # noqa: SLF001
+        live_client._last_timestamp = 100.0  # noqa: SLF001
+        await live_client.play()
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.elapsed_milliseconds == 10_700
+        clock[0] = 104.0
+        assert live_client.elapsed_milliseconds == 11_700
+
+    @pytest.mark.asyncio
+    async def test_a_pause_made_on_the_player_holds_the_position_too(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pause the player started itself holds the position as well."""
+        clock = self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        await live_client._process_stat_stmp(b"")  # noqa: SLF001
+        clock[0] = 108.0
+        assert live_client.state == PlayerState.PAUSED
+        assert live_client.elapsed_milliseconds == 10_400
+
+    @pytest.mark.asyncio
+    async def test_a_resume_made_on_the_player_restarts_the_clock(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the player resumed by itself, the position counts on from there."""
+        clock = self._clock(monkeypatch, 109.0)
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        live_client._elapsed_milliseconds = 10_400  # noqa: SLF001
+        live_client._last_timestamp = 100.0  # noqa: SLF001
+        await live_client._process_stat_stmr(b"")  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.elapsed_milliseconds == 10_400
+        clock[0] = 110.0
+        assert live_client.elapsed_milliseconds == 11_400
+
+    @pytest.mark.asyncio
+    async def test_the_confirmation_of_our_own_resume_does_not_move_the_clock(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """play() already restarted the clock, so the confirmation leaves it alone."""
+        clock = self._clock(monkeypatch, 103.0)
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        live_client._elapsed_milliseconds = 10_700  # noqa: SLF001
+        live_client._last_timestamp = 100.0  # noqa: SLF001
+        await live_client.play()
+        clock[0] = 103.5
+        await live_client._process_stat_stmr(b"")  # noqa: SLF001
+        assert live_client.elapsed_milliseconds == 11_200
+
+    @pytest.mark.asyncio
+    async def test_pausing_while_buffering_leaves_the_reported_position_alone(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is extrapolated while buffering, so there is nothing to hold."""
+        self._clock(monkeypatch, 100.7)
+        live_client._state = PlayerState.BUFFERING  # noqa: SLF001
+        live_client._elapsed_milliseconds = 4_000  # noqa: SLF001
+        await live_client.pause()
+        assert live_client.state == PlayerState.PAUSED
+        assert live_client.elapsed_milliseconds == 4_000

@@ -101,6 +101,9 @@ class SlimClient:
         self._muted: bool = False
         self._state = PlayerState.STOPPED
         self._jiffies: int = 0
+        # when _jiffies was reported; kept apart from _last_timestamp, which is
+        # also reset when a stream is flushed or started
+        self._jiffies_timestamp: float = 0
         self._last_timestamp: float = 0
         self._elapsed_milliseconds: float = 0
         # reported whole-second counter from the same STMt status; kept alongside the
@@ -275,7 +278,7 @@ class SlimClient:
     @property
     def jiffies(self) -> int:
         """Return (realtime) epoch timestamp from player."""
-        return self._jiffies + int((time.time() - self._last_timestamp) * 1000)
+        return self._jiffies + int((time.time() - self._jiffies_timestamp) * 1000)
 
     # ------------------------------------------------------------------
     # LMS-compatible clock mapping and play points
@@ -453,9 +456,16 @@ class SlimClient:
         """Send play/unpause command to player."""
         if self._state != PlayerState.PAUSED:
             return
-        await self._send_strm(b"u", flags=0)
+        # restart the clock before the send so an STMr arriving meanwhile
+        # is not taken for a resume the player made itself
+        self._last_timestamp = time.time()
         # some players do not update their state by event so we force it here
         self._state = PlayerState.PLAYING
+        try:
+            await self._send_strm(b"u", flags=0)
+        except BaseException:
+            self._state = PlayerState.PAUSED
+            raise
         self.signal_update()
 
     async def pause(self) -> None:
@@ -463,6 +473,7 @@ class SlimClient:
         if self._state not in (PlayerState.PLAYING, PlayerState.BUFFERING):
             return
         await self._send_strm(b"p")
+        self._hold_elapsed()
         # some players do not update their state by event so we force it here
         self._state = PlayerState.PAUSED
         self.signal_update()
@@ -480,8 +491,7 @@ class SlimClient:
             return
         if not powered:
             await self.stop()
-        power_int = 1 if powered else 0
-        await self.send_frame(b"aude", struct.pack("2B", power_int, 1))
+        await self._send_power(powered)
         self._powered = powered
         self.signal_update()
         await self._render_display()
@@ -495,36 +505,21 @@ class SlimClient:
         if volume_level == self.volume_control.volume:
             return
         self.volume_control.volume = volume_level
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
-        )
+        await self._send_gain()
         self.signal_update()
         await self._render_display("show_volume")
 
     async def volume_up(self) -> None:
         """Send volume up command to player."""
         self.volume_control.increment()
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
-        )
+        await self._send_gain()
         self.signal_update()
         await self._render_display("show_volume")
 
     async def volume_down(self) -> None:
         """Send volume down command to player."""
         self.volume_control.decrement()
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
-        await self.send_frame(
-            b"audg",
-            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
-        )
+        await self._send_gain()
         self.signal_update()
         await self._render_display("show_volume")
 
@@ -719,16 +714,14 @@ class SlimClient:
 
     async def send_frame(self, command: bytes, data: bytes) -> None:
         """Send (raw) command to Squeeze player."""
+        # the reader signals a lost connection; disconnect() here would cancel it first
         if self._reader.at_eof() or self._writer.is_closing():
             self.logger.debug("Socket is disconnected.")
-            self.disconnect()
             return
         packet = struct.pack("!H", len(data) + 4) + command + data
-        try:
+        with suppress(ConnectionError):
             self._writer.write(packet)
             await self._writer.drain()
-        except ConnectionResetError:
-            self.disconnect()
 
     async def _render_display(self, action: str | None = None) -> None:
         """Set display based on the current state."""
@@ -794,27 +787,32 @@ class SlimClient:
             try:
                 async with timeout(HEARTBEAT_INTERVAL * 2):
                     data = await self._reader.read(64)
-            except (TimeoutError, ConnectionResetError):
+            except (TimeoutError, ConnectionError):
                 break
             # handle incoming data from socket
             buffer = buffer + data
             del data
-            if len(buffer) > 8:
-                # construct operation and
+            bye = False
+            # a single read can hold several packets (and a partial one at the end)
+            while len(buffer) >= 8:
                 operation, length = buffer[:4], buffer[4:8]
                 plen = struct.unpack("!I", length)[0] + 8
-                if len(buffer) >= plen:
-                    packet, buffer = buffer[8:plen], buffer[plen:]
-                    operation = operation.strip(b"!").strip().decode().lower()
-                    if operation == "bye!":
-                        break
-                    handler = getattr(self, f"_process_{operation}", None)
-                    if handler is None:
-                        self.logger.debug("No handler for %s", operation)
-                    elif inspect.iscoroutinefunction(handler):
-                        create_task(handler(packet))
-                    else:
-                        asyncio.get_running_loop().call_soon(handler, packet)
+                if len(buffer) < plen:
+                    break
+                packet, buffer = buffer[8:plen], buffer[plen:]
+                operation = operation.strip(b"!").strip().decode().lower()
+                if operation == "bye":
+                    bye = True
+                    break
+                handler = getattr(self, f"_process_{operation}", None)
+                if handler is None:
+                    self.logger.debug("No handler for %s", operation)
+                elif inspect.iscoroutinefunction(handler):
+                    create_task(handler(packet))
+                else:
+                    asyncio.get_running_loop().call_soon(handler, packet)
+            if bye:
+                break
         # EOF reached: socket is disconnected
         self._connected = False
         self.logger.debug(
@@ -822,9 +820,9 @@ class SlimClient:
             self._writer.get_extra_info("peername"),
         )
         self.callback(self, EventType.PLAYER_DISCONNECTED)
-        self.disconnect()
+        self._writer.close()
 
-    async def _send_strm(  # noqa: PLR0913
+    async def _send_strm(  # noqa: PLR0913, PLR0917
         self,
         command: bytes = b"q",
         autostart: bytes = b"0",
@@ -888,8 +886,16 @@ class SlimClient:
         # restore last power and volume levels
         # NOTE: this can be improved by storing the previous volume/power levels
         # so they can be restored when the player (re)connects.
-        await self.power(self._powered)
-        await self.volume_set(self.volume_level)
+        # power() and volume_set() skip unchanged values, but the player has none yet
+        await self._send_power(self._powered)
+        await self._send_gain()
+        if (
+            self._reader.at_eof()
+            or self._writer.is_closing()
+            or self._reader_task.done()
+        ):
+            # the player disconnected while we were setting it up
+            return
         self._connected = True
         self._heartbeat_task = asyncio.create_task(self._send_heartbeat())
         self.callback(self, EventType.PLAYER_CONNECTED)
@@ -993,7 +999,7 @@ class SlimClient:
         """Redirect incoming STAT event from player to correct method."""
         event = data[:4].decode()
         event_data = data[4:]
-        if event == b"\x00\x00\x00\x00":
+        if event == "\x00\x00\x00\x00":
             # Presumed informational stat message
             return
         event_handler = getattr(self, f"_process_stat_{event.lower()}", None)
@@ -1059,9 +1065,16 @@ class SlimClient:
         else:
             self.callback(self, EventType.PLAYER_OUTPUT_UNDERRUN)
 
+    def _hold_elapsed(self) -> None:
+        """Freeze the extrapolated position so it stays put while not playing."""
+        if self._state == PlayerState.PLAYING:
+            self._elapsed_milliseconds = self.elapsed_milliseconds
+            self._last_timestamp = time.time()
+
     async def _process_stat_stmp(self, data: bytes) -> None:
         """Process incoming stat STMp message: Pause confirmed."""
         self.logger.debug("STMp received - pause confirmed.")
+        self._hold_elapsed()
         self._state = PlayerState.PAUSED
         self.signal_update()
         await self._render_display()
@@ -1069,6 +1082,9 @@ class SlimClient:
     async def _process_stat_stmr(self, data: bytes) -> None:
         """Process incoming stat STMr message: Resume confirmed."""
         self.logger.debug("STMr received - resume confirmed.")
+        if self._state == PlayerState.PAUSED:
+            # resumed by the player itself, so the position counts on from now
+            self._last_timestamp = time.time()
         self._state = PlayerState.PLAYING
         self.signal_update()
         await self._render_display()
@@ -1093,25 +1109,26 @@ class SlimClient:
     def _process_stat_stmt(self, data: bytes) -> None:
         """Process incoming stat STMt message: heartbeat from client."""
         (
-            num_crlf,
-            mas_initialized,
-            mas_mode,
-            rptr,
-            wptr,
-            bytes_received_h,
-            bytes_received_l,
-            signal_strength,
+            _num_crlf,
+            _mas_initialized,
+            _mas_mode,
+            _rptr,
+            _wptr,
+            _bytes_received_h,
+            _bytes_received_l,
+            _signal_strength,
             jiffies,
-            output_buffer_size,
-            output_buffer_readyness,
+            _output_buffer_size,
+            _output_buffer_readyness,
             elapsed_seconds,
-            voltage,
+            _voltage,
             elapsed_milliseconds,
-            server_heartbeat,
+            _server_heartbeat,
         ) = struct.unpack("!BBBLLLLHLLLLHLL", data[:47])
 
         now = time.time()
         self._jiffies = jiffies
+        self._jiffies_timestamp = now
         self._last_timestamp = now
         self.track_jiffies_epoch(jiffies, now)
         if self._awaiting_stream_start:
@@ -1195,6 +1212,8 @@ class SlimClient:
                 self._buffering_media.metadata,
                 self._buffering_media.transition,
                 self._buffering_media.transition_duration,
+                stream_threshold=self._buffering_media.stream_threshold,
+                output_threshold=self._buffering_media.output_threshold,
                 autostart=self._auto_play,
             )
             return
@@ -1244,8 +1263,10 @@ class SlimClient:
         self.logger.debug("SETD received - %s", data)
         data_id = data[0]
         if data_id == 0:
-            # received player name
-            self._device_name = data[1:-1].decode()
+            # received player name, NUL terminated except on SqueezePlay (Radio/Touch)
+            self._device_name = (
+                data[1:].split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+            )
             self.callback(self, EventType.PLAYER_NAME_RECEIVED, self._device_name)
             self.logger = logging.getLogger(__name__).getChild(self._device_name)
         if data_id == 0xFE:
@@ -1329,3 +1350,16 @@ class SlimClient:
             else:
                 codc_msg = FORMAT_BYTE[codec] + b"????"
         return codc_msg
+
+    async def _send_power(self, powered: bool) -> None:
+        """Send a power state to the player."""
+        await self.send_frame(b"aude", struct.pack("2B", int(powered), 1))
+
+    async def _send_gain(self) -> None:
+        """Send the current volume level to the player."""
+        old_gain = self.volume_control.old_gain()
+        new_gain = self.volume_control.new_gain()
+        await self.send_frame(
+            b"audg",
+            struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
+        )
