@@ -176,6 +176,101 @@ class TestSyncStart:
 
         client._send_strm.assert_called_once_with(b"u", replay_gain=500)  # noqa: SLF001
 
+    async def test_start_at_without_clock_unpauses_plainly(
+        self, make_client: MakeClient
+    ) -> None:
+        """A player whose clock is not known yet is unpaused right away."""
+        client = make_client("a")
+
+        await client.start_at(1000.0)
+
+        client._send_strm.assert_called_once_with(b"u", replay_gain=0)  # noqa: SLF001
+
+
+class TestSyncResume:
+    """Group resume (port of _Resume)."""
+
+    NOW = 1_000_000.0
+    PAUSED_AT = 42.0
+
+    @staticmethod
+    def _set_paused_position(client: SlimClient, elapsed_ms: int) -> None:
+        """Give the client a clock epoch of 0 and a reported song position."""
+        client._jiffies_epoch = 0.0  # noqa: SLF001
+        client._jiffies = int((TestSyncResume.NOW - 1) * 1000)  # noqa: SLF001
+        client._elapsed_milliseconds = elapsed_ms  # noqa: SLF001
+
+    @staticmethod
+    def _start_instant(client: SlimClient) -> float:
+        """Return the server time a client was told to start at (epoch 0)."""
+        call_args = client._send_strm.call_args  # noqa: SLF001
+        assert call_args.args[0] == b"u"
+        return float(call_args.kwargs["replay_gain"]) / 1000
+
+    async def test_delays_each_player_by_its_lead_over_the_pause_point(
+        self, make_client: MakeClient
+    ) -> None:
+        """A player paused past the pause point starts that much later."""
+        ahead = make_client("a")
+        behind = make_client("b")
+        self._set_paused_position(ahead, 42_050)
+        self._set_paused_position(behind, 41_980)
+
+        await SyncGroup().resume([ahead, behind], self.PAUSED_AT, now=self.NOW)
+
+        base = self.NOW + 0.200
+        assert self._start_instant(ahead) == pytest.approx(base + 0.050, abs=0.002)
+        assert self._start_instant(behind) == pytest.approx(base, abs=0.002)
+
+    async def test_player_without_play_point_starts_at_the_base_instant(
+        self, make_client: MakeClient
+    ) -> None:
+        """A player without a play point gets no extra delay."""
+        first = make_client("a")
+        second = make_client("b")
+        self._set_paused_position(first, 42_050)
+        self._set_paused_position(second, 0)
+
+        await SyncGroup().resume([first, second], self.PAUSED_AT, now=self.NOW)
+
+        base = self.NOW + 0.200
+        assert self._start_instant(second) == pytest.approx(base, abs=0.002)
+
+    async def test_single_player_is_unpaused_plainly(
+        self, make_client: MakeClient
+    ) -> None:
+        """A single player resumes right away without a start instant."""
+        only = make_client("a")
+        self._set_paused_position(only, 42_050)
+
+        await SyncGroup().resume([only], self.PAUSED_AT, now=self.NOW)
+
+        only._send_strm.assert_called_once_with(b"u", replay_gain=0)  # noqa: SLF001
+
+    async def test_holds_off_the_sync_check_after_a_resume(
+        self, make_client: MakeClient
+    ) -> None:
+        """No correction runs until two seconds after the common start instant."""
+        now = 9000.0
+        first = make_client("a")
+        second = make_client("b")
+        self._set_paused_position(first, 42_000)
+        self._set_paused_position(second, 42_000)
+        group = SyncGroup()
+        await group.resume([first, second], self.PAUSED_AT, now=now)
+        second._send_strm.reset_mock()  # noqa: SLF001
+        # the second player is now 250ms behind
+        _set_play_point(first, now + 1.9, 8000.0)
+        _set_play_point(second, now + 1.9, 8000.25)
+
+        await group.check([first, second], now=now + 2.1)
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+        await group.check([first, second], now=now + 2.3)
+        call_args = second._send_strm.call_args  # noqa: SLF001
+        assert call_args.args[0] == b"a"
+        assert call_args.kwargs["replay_gain"] == pytest.approx(250, abs=1)
+
 
 class TestCheckSync:
     """Steady-state correction (port of _CheckSync)."""
