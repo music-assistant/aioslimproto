@@ -400,6 +400,31 @@ class TestStreamBodyWaitsForCont:
         client.send_frame.assert_awaited_once_with(b"cont", _CONT_PAYLOAD)
 
 
+class TestCodcSampleRate:
+    """The codc of a PCM stream carries the slimproto code of its sample rate."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("rate", "code"),
+        [(8000, b"5"), (11025, b"0"), (22050, b"1"), (32000, b"2"), (44100, b"3")],
+    )
+    async def test_resp_sends_rate_code(
+        self, client: SlimClient, *, rate: int, code: bytes
+    ) -> None:
+        """Each rate gets its slimproto code, then the cont follows."""
+        client.send_frame = AsyncMock()
+
+        await client._process_resp(  # noqa: SLF001
+            b"HTTP/1.0 200 OK\r\n"
+            b"Content-Type: audio/wav;rate=%d;bitrate=16;channels=2\r\n\r\n" % rate
+        )
+
+        assert client.send_frame.await_args_list == [
+            call(b"codc", b"p1" + code + b"21"),
+            call(b"cont", _CONT_PAYLOAD),
+        ]
+
+
 class TestStaleRespIsIgnored:
     """A RESP of a stream the player already dropped must not reach the new stream."""
 
