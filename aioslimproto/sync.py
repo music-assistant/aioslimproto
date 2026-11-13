@@ -33,10 +33,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 class SyncGroup:
-    """Holds sync state for one group of players.
+    """
+    Holds sync state for one group of players.
 
     Mirrors the synchronisation duties of LMS' StreamingController, without the
-    transport/state-machine parts.
+    transport/state-machine parts. All server times are ``time.monotonic()``
+    seconds, the clock :class:`SlimClient` maps the player clocks onto.
     """
 
     def __init__(self) -> None:
@@ -60,7 +62,7 @@ class SyncGroup:
         clients = list(clients)
         if len(clients) < 2:
             return
-        now = now if now is not None else time.time()
+        now = now if now is not None else time.monotonic()
 
         player_start_delay = 0
         for client in clients:
@@ -107,7 +109,7 @@ class SyncGroup:
         :param now: Optional server time override (for testing).
         """
         clients = list(clients)
-        now = now if now is not None else time.time()
+        now = now if now is not None else time.monotonic()
 
         if len(clients) < 2:
             for client in clients:
@@ -139,7 +141,7 @@ class SyncGroup:
         if len(clients) < 2:
             return
 
-        now = now if now is not None else time.time()
+        now = now if now is not None else time.monotonic()
         if now < self.next_check:
             return
         self.next_check = now + CHECK_SYNC_INTERVAL

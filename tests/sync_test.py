@@ -1,8 +1,11 @@
 """Tests for the LMS-ported sync logic (clock map, play points, sync group)."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
 import logging
+import struct
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -43,6 +46,16 @@ def make_client(writer: Mock) -> MakeClient:
         return client
 
     return _factory
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Fake the wall and monotonic clock of the sync code; both start out equal."""
+    clock = SimpleNamespace(wall=9_000.0, mono=9_000.0)
+    fake_time = SimpleNamespace(time=lambda: clock.wall, monotonic=lambda: clock.mono)
+    monkeypatch.setattr("aioslimproto.client.time", fake_time)
+    monkeypatch.setattr("aioslimproto.sync.time", fake_time)
+    return clock
 
 
 def _set_play_point(client: SlimClient, status_time: float, apparent: float) -> None:
@@ -86,6 +99,128 @@ class TestJiffiesEpoch:
         jiffies = BASE_JIFFIES + (samples - 1) * 1000
         expected = jiffies / 1000 + TRUE_OFFSET + (samples - 1) * drift_per_sample
         assert client.jiffies_to_timestamp(jiffies) == pytest.approx(expected, abs=0.05)
+
+    async def test_first_sample_sets_the_epoch(self, make_client: MakeClient) -> None:
+        """A player clock reading close to the server clock is mapped right away."""
+        client = make_client()
+        # e.g. a player on the server host, which shares its monotonic clock
+        client.track_jiffies_epoch(1_000_000, 1_000.5)
+
+        await client.start_at(1_002.5)
+
+        client._send_strm.assert_called_once_with(b"u", replay_gain=1_002_000)  # noqa: SLF001
+
+
+class TestSyncClock:
+    """Sync timing runs on the monotonic clock, timed at the socket read."""
+
+    @pytest.fixture
+    async def live_client(self, writer: Mock) -> AsyncIterator[SlimClient]:
+        """Create a SlimClient that reads its packets from a live socket reader."""
+        client = SlimClient(asyncio.StreamReader(), writer, Mock())
+        client.packet_latency = 0.0
+        yield client
+        client._reader_task.cancel()  # noqa: SLF001
+
+    @staticmethod
+    async def _heartbeat(client: SlimClient, jiffies: int) -> None:
+        """Let the player send an STMt with its clock at jiffies; wait until handled."""
+        handled = asyncio.Event()
+        client.callback = Mock(side_effect=lambda *_args: handled.set())
+        payload = b"STMt" + struct.pack(
+            "!BBBLLLLHLLLLHLL", 0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, 0, 0, 0, 0
+        )
+        client._reader.feed_data(  # noqa: SLF001
+            b"STAT" + struct.pack("!I", len(payload)) + payload
+        )
+        await asyncio.wait_for(handled.wait(), 1)
+
+    async def test_epoch_survives_a_wall_clock_step(
+        self, live_client: SlimClient, clock: SimpleNamespace
+    ) -> None:
+        """A wall clock step (e.g. an NTP correction) leaves the clock mapping alone."""
+        await self._heartbeat(live_client, 5_000_000)
+        epoch = live_client.jiffies_epoch
+        clock.mono += 1
+        clock.wall += 3_601
+
+        await self._heartbeat(live_client, 5_001_000)
+
+        assert live_client.jiffies_epoch == epoch
+        assert live_client.jiffies_to_timestamp(5_001_000) == clock.mono
+
+    async def test_arrival_is_timed_at_the_socket_read(
+        self,
+        live_client: SlimClient,
+        clock: SimpleNamespace,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Event-loop delay between the read and its handling stays out of the map."""
+        read_at = clock.mono
+
+        def create_task_later(coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+            # the handler only gets to run half a second after the read
+            clock.mono += 0.5
+            clock.wall += 0.5
+            return asyncio.create_task(coro)
+
+        monkeypatch.setattr("aioslimproto.client.create_task", create_task_later)
+
+        await self._heartbeat(live_client, 5_000_000)
+
+        assert live_client.jiffies_epoch == read_at - 5_000
+
+    async def test_song_position_extrapolates_on_the_monotonic_clock(
+        self, make_client: MakeClient, clock: SimpleNamespace
+    ) -> None:
+        """A playing player's song position counts on in monotonic time."""
+        client = make_client()
+        client._state = PlayerState.PLAYING  # noqa: SLF001
+        client._jiffies_epoch = 0.0  # noqa: SLF001
+        client._jiffies = int(clock.mono * 1000)  # noqa: SLF001
+        client._elapsed_milliseconds = 42_000  # noqa: SLF001
+        clock.mono += 0.25
+        clock.wall += 3_600
+
+        assert client.song_elapsed_seconds == pytest.approx(42.25)
+
+    @pytest.mark.parametrize(
+        "begin",
+        [
+            lambda group, clients: group.start(clients),
+            lambda group, clients: group.resume(clients, 42.0),
+        ],
+        ids=["start", "resume"],
+    )
+    async def test_group_starts_on_the_monotonic_clock(
+        self, make_client: MakeClient, clock: SimpleNamespace, begin: Callable
+    ) -> None:
+        """Without a time override the start instant is taken on the monotonic clock."""
+        clients = [make_client("a"), make_client("b")]
+        for client in clients:
+            client._jiffies_epoch = 0.0  # noqa: SLF001
+        clock.wall += 3_600
+
+        await begin(SyncGroup(), clients)
+
+        for client in clients:
+            client._send_strm.assert_called_once_with(  # noqa: SLF001
+                b"u", replay_gain=int((clock.mono + 0.2) * 1000)
+            )
+
+    async def test_group_checks_on_the_monotonic_clock(
+        self, make_client: MakeClient, clock: SimpleNamespace
+    ) -> None:
+        """Without a time override play points are aged on the monotonic clock."""
+        first, second = make_client("a"), make_client("b")
+        for client, apparent in ((first, 8000.0), (second, 8000.25)):
+            client.min_sync_adjust = 10
+            _set_play_point(client, clock.mono - 0.2, apparent)
+        clock.wall += 3_600
+
+        await SyncGroup().check([first, second])
+
+        second._send_strm.assert_any_call(b"a", replay_gain=250)  # noqa: SLF001
 
 
 class TestPlayPoint:

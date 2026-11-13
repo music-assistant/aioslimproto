@@ -292,21 +292,26 @@ class SlimClient:
 
     @property
     def jiffies_epoch(self) -> float:
-        """Return the offset mapping player jiffies to server time (seconds)."""
+        """Return the offset mapping player jiffies to ``time.monotonic()`` seconds."""
         return self._jiffies_epoch or 0.0
 
     def track_jiffies_epoch(self, jiffies: int, timestamp: float) -> None:
-        """Track the offset between the player jiffies clock and server time.
+        """
+        Track the offset between the player jiffies clock and server time.
 
         Direct port of Slim::Player::Player::trackJiffiesEpoch: it keeps the
         smallest observed offset (least queueing delay) and slowly nudges the
         epoch to follow clock drift.
+
+        :param jiffies: The player clock value reported in a status message.
+        :param timestamp: When that message arrived, in ``time.monotonic()`` seconds.
         """
         jiffies_time = jiffies / self.tics_per_sec
         offset = timestamp - jiffies_time
-        epoch = self._jiffies_epoch or 0.0
+        epoch = self._jiffies_epoch
 
-        if offset < epoch or offset - epoch > 50:  # better estimate or wrap-around
+        # first sample, better estimate or wrap-around
+        if epoch is None or offset < epoch or offset - epoch > 50:
             epoch = offset
             self._jiffies_epoch = epoch
 
@@ -329,17 +334,19 @@ class SlimClient:
                 offsets.clear()
 
     def jiffies_to_timestamp(self, jiffies: int) -> float:
-        """Translate a player jiffies value into a server timestamp."""
+        """Translate a player jiffies value into server time (``time.monotonic()``)."""
         return self.jiffies_epoch + jiffies / self.tics_per_sec - self.packet_latency
 
     @property
     def play_point(self) -> tuple[float, float, float] | None:
-        """Return the play point (status time, apparent start, song elapsed).
+        """
+        Return the play point (status time, apparent start, song elapsed).
 
         Port of Slim::Player::Squeezebox2::playPoint. The apparent stream start
         time normalizes away per-player buffer/decoder differences, so two
         players that are in sync share the same value. The song elapsed time is
         used to align a group resume (see :meth:`SyncGroup.resume`).
+        Status time and apparent start are in ``time.monotonic()`` seconds.
         """
         if self._jiffies_epoch is None or not self._elapsed_milliseconds:
             return None
@@ -374,7 +381,7 @@ class SlimClient:
             song_elapsed = self._elapsed_seconds + (elapsed_ms % 1000) / 1000
         if self._state == PlayerState.PLAYING and self._jiffies_epoch is not None:
             # extrapolate to "now" using the jiffies -> server-time mapping
-            time_diff = time.time() - self.jiffies_to_timestamp(self._jiffies)
+            time_diff = time.monotonic() - self.jiffies_to_timestamp(self._jiffies)
             if time_diff > 0:
                 song_elapsed += time_diff
         return song_elapsed
@@ -398,7 +405,11 @@ class SlimClient:
         return True
 
     async def start_at(self, server_time: float) -> None:
-        """Unpause the player so it starts at the given server time (epoch s)."""
+        """
+        Unpause the player so it starts at the given server time.
+
+        :param server_time: The start instant, in ``time.monotonic()`` seconds.
+        """
         if self._jiffies_epoch is None:
             # No STMt has set the clock epoch yet; a silent no-op would strand the
             # player (it never unpauses). Fall back to a plain unpause (strm u),
@@ -792,6 +803,9 @@ class SlimClient:
                     data = await self._reader.read(64)
             except (TimeoutError, ConnectionError):
                 break
+            # taken before any handling, so event-loop delay stays out of the
+            # player clock mapping
+            received = time.monotonic()
             # handle incoming data from socket
             buffer = buffer + data
             del data
@@ -810,6 +824,8 @@ class SlimClient:
                 handler = getattr(self, f"_process_{operation}", None)
                 if handler is None:
                     self.logger.debug("No handler for %s", operation)
+                elif operation == "stat":
+                    create_task(handler(packet, received))
                 elif inspect.iscoroutinefunction(handler):
                     create_task(handler(packet))
                 else:
@@ -998,12 +1014,16 @@ class SlimClient:
         # from the data stream either because the stream ended, or because
         # they have finished buffering the current file
 
-    async def _process_stat(self, data: bytes) -> None:
+    async def _process_stat(self, data: bytes, received: float) -> None:
         """Redirect incoming STAT event from player to correct method."""
         event = data[:4].decode()
         event_data = data[4:]
         if event == "\x00\x00\x00\x00":
             # Presumed informational stat message
+            return
+        if event == "STMt":
+            # the heartbeat maps the player clock, which needs its arrival time
+            self._process_stat_stmt(event_data, received)
             return
         event_handler = getattr(self, f"_process_stat_{event.lower()}", None)
         # handled inline, so stat events start in arrival order with other packets
@@ -1109,7 +1129,7 @@ class SlimClient:
         self.signal_update()
         await self._render_display("playback_start")
 
-    def _process_stat_stmt(self, data: bytes) -> None:
+    def _process_stat_stmt(self, data: bytes, received: float) -> None:
         """Process incoming stat STMt message: heartbeat from client."""
         (
             _num_crlf,
@@ -1133,7 +1153,7 @@ class SlimClient:
         self._jiffies = jiffies
         self._jiffies_timestamp = now
         self._last_timestamp = now
-        self.track_jiffies_epoch(jiffies, now)
+        self.track_jiffies_epoch(jiffies, received)
         if self._awaiting_stream_start:
             # trailing heartbeat of the flushed stream: keep elapsed at 0 until the
             # new stream starts (STMs), so we don't surface the old position

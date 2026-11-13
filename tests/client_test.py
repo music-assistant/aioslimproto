@@ -445,7 +445,7 @@ class TestJiffies:
         self, live_client: SlimClient, now: list[float]
     ) -> None:
         """A flush (new track or seek) doesn't move the player clock."""
-        await live_client._process_stat(_stmt_payload(40_000))  # noqa: SLF001
+        await live_client._process_stat(_stmt_payload(40_000), received=0.0)  # noqa: SLF001
         now[0] += 0.5
         await live_client.play_url(url=_TRACK_URL, autostart=False, send_flush=True)
         now[0] += 0.25
@@ -457,9 +457,9 @@ class TestJiffies:
         self, live_client: SlimClient, now: list[float]
     ) -> None:
         """A stream start (STMs) doesn't move the player clock."""
-        await live_client._process_stat(_stmt_payload(40_000))  # noqa: SLF001
+        await live_client._process_stat(_stmt_payload(40_000), received=0.0)  # noqa: SLF001
         now[0] += 0.8
-        await live_client._process_stat(b"STMs" + bytes(47))  # noqa: SLF001
+        await live_client._process_stat(b"STMs" + bytes(47), received=0.0)  # noqa: SLF001
         now[0] += 0.1
 
         assert live_client.jiffies == 40_900
