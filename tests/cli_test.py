@@ -85,6 +85,9 @@ def dummy_player() -> SlimClient:
             volume_set=AsyncMock(),
             muted=False,
             mute=AsyncMock(),
+            play=AsyncMock(),
+            pause=AsyncMock(),
+            toggle_pause=AsyncMock(),
         ),
     )
 
@@ -584,6 +587,61 @@ class TestMixerMutingCommand:
         )
         expected_response = encode_response("a5:41:d2:cd:cd:05", "mixer", "muting", "0")
         assert response == expected_response
+
+
+class TestPauseCommand:
+    """Tests for the pause command.
+
+    Reference: https://lyrion.org/reference/cli/players/#pause
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", [PlayerState.PLAYING, PlayerState.PAUSED])
+    @pytest.mark.parametrize(
+        ("command", "expected_call"),
+        [
+            ("pause 1", "pause"),
+            ("pause 0", "play"),
+            ("pause", "toggle_pause"),
+            ("pause 0 2", "play"),
+            ("mode pause", "pause"),
+            ("mode play", "play"),
+        ],
+    )
+    async def test_pause_command(
+        self,
+        writer: Mock,
+        dummy_server: SlimServer,
+        dummy_player: SlimClient,
+        command: str,
+        expected_call: str,
+        state: PlayerState,
+    ) -> None:
+        """Should pause, unpause or toggle as requested, whatever the player state."""
+        dummy_player.state = state
+        cli = SlimProtoCLI(dummy_server)
+
+        await send_cli_command(cli, writer, f"a5:41:d2:cd:cd:05 {command}")
+
+        for method in ("play", "pause", "toggle_pause"):
+            mock = cast("AsyncMock", getattr(dummy_player, method))
+            if method == expected_call:
+                mock.assert_awaited_once_with()
+            else:
+                mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pause_command_over_jsonrpc(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should accept the value as a number in a JSON-RPC request."""
+        cli = SlimProtoCLI(dummy_server)
+
+        result = await cli._handle_command(("a5:41:d2:cd:cd:05", ["pause", 0]))  # noqa: SLF001 # Accessing a protected member for testing purposes
+
+        assert result == {}
+        cast("AsyncMock", dummy_player.play).assert_awaited_once_with()
+        cast("AsyncMock", dummy_player.pause).assert_not_called()
 
 
 class TestCommandHandler:
