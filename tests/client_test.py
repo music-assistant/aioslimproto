@@ -117,7 +117,7 @@ class TestDecoderReadyPromotesAtEnqueueTime:
 
         assert live_client._send_strm.call_args.kwargs["command"] == b"s"  # noqa: SLF001
         assert live_client.next_media is None
-        assert live_client.state == PlayerState.BUFFERING
+        assert live_client.state == PlayerState.PLAYING
 
     @pytest.mark.asyncio
     async def test_enqueue_without_decoder_ready_is_stored(
@@ -168,6 +168,81 @@ class TestDecoderReadyPromotesAtEnqueueTime:
 
         live_client._send_strm.assert_not_called()  # noqa: SLF001
         assert live_client.next_media is not None
+
+
+class TestGaplessHandoffState:
+    """The current track plays on from the output buffer until the next one starts."""
+
+    @staticmethod
+    async def _hand_off(client: SlimClient) -> None:
+        """Enqueue the next track and let STMd and STMc start its stream."""
+        await client.play_url(
+            url="http://127.0.0.1:8080/next.mp3",
+            enqueue=True,
+            send_flush=False,
+        )
+        client._process_stat_stmd(b"")  # noqa: SLF001
+        await asyncio.sleep(0)  # let the promotion task send the strm-s
+        assert client._send_strm.call_args.kwargs["command"] == b"s"  # noqa: SLF001
+        client._process_stat_stmc(b"")  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_playing_player_keeps_playing_until_the_next_track_starts(
+        self, live_client: SlimClient
+    ) -> None:
+        """The player reports playing throughout the handoff, not buffering."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+
+        await self._hand_off(live_client)
+        assert live_client.state == PlayerState.PLAYING
+
+        await live_client._process_stat_stms(b"")  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.current_media is not None
+        assert live_client.current_media.url == "http://127.0.0.1:8080/next.mp3"
+
+    @pytest.mark.asyncio
+    async def test_pause_key_pauses_during_the_handoff(
+        self, live_client: SlimClient
+    ) -> None:
+        """Toggling pause while the next track is queued pauses the current one."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        await self._hand_off(live_client)
+
+        await live_client.toggle_pause()
+
+        live_client._send_strm.assert_called_with(b"p")  # noqa: SLF001
+        assert live_client.state == PlayerState.PAUSED
+
+    @pytest.mark.asyncio
+    async def test_paused_player_stays_paused_and_can_resume(
+        self, live_client: SlimClient
+    ) -> None:
+        """A handoff while paused (decoder done near the track end) keeps it paused."""
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+
+        await self._hand_off(live_client)
+        assert live_client.state == PlayerState.PAUSED
+
+        await live_client.play()
+        live_client._send_strm.assert_called_with(b"u", flags=0)  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("state", "send_flush"),
+        [(PlayerState.PLAYING, True), (PlayerState.STOPPED, False)],
+    )
+    async def test_new_stream_without_audio_ahead_reports_buffering(
+        self, live_client: SlimClient, state: PlayerState, *, send_flush: bool
+    ) -> None:
+        """A flushed or stopped player has nothing to play until the stream starts."""
+        live_client._state = state  # noqa: SLF001
+
+        await live_client.play_url(url=_TRACK_URL, send_flush=send_flush)
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+
+        assert live_client.state == PlayerState.BUFFERING
 
 
 class TestStopInvalidatesEnqueuedMedia:
