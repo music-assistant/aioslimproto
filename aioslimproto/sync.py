@@ -20,8 +20,10 @@ from .const import (
     MAX_DEVIATION_ADJUST,
     MIN_DEVIATION_ADJUST,
     PLAYPOINT_RECENT_THRESHOLD,
+    SYNC_PLAYPOINT_SETTLE,
     SYNC_RESUME_HOLDOFF,
     SYNC_START_DELAY,
+    SYNC_START_HOLDOFF,
 )
 from .models import PlayerState
 
@@ -49,22 +51,26 @@ class SyncGroup:
         # time of the reference's play point), for each player outside the deadband
         # on the previous check
         self._deviating: dict[str, tuple[bool, float, float]] = {}
+        # the first check after a start or resume only takes play points reported
+        # after this time
+        self._settled_after: float | None = None
 
     async def start(
         self,
         clients: Iterable[SlimClient],
         now: float | None = None,
     ) -> None:
-        """Start all players at a common server time (port of ``_syncStart``).
-
-        LMS ``_syncStart`` sets no ``nextCheckSyncTime`` holdoff (unlike
-        ``_Resume``), so the first ``_CheckSync`` can run ~1s into play and issue
-        an audible ``skipAhead``/``pauseFor`` correction for a member that landed
-        beyond its ``min_sync_adjust`` (observed: a Squeezebox Radio starting
-        ~276-441ms off a SqueezeLite). A per-player learned start offset is a
-        possible future improvement.
         """
-        self._deviating.clear()
+        Start all players at a common server time (port of ``_syncStart``).
+
+        Unlike ``_syncStart``, the first sync check is held off
+        (``SYNC_START_HOLDOFF``) and skips play points from the first second of
+        playback (``SYNC_PLAYPOINT_SETTLE``), which can be far off. That check then
+        corrects a member that landed beyond its ``min_sync_adjust`` (e.g. a
+        Squeezebox Radio starting ~276-441ms off a SqueezeLite, or a player with a
+        slow audio output) with an audible ``skipAhead``/``pauseFor``. A per-player
+        learned start offset is a possible future improvement.
+        """
         clients = list(clients)
         if len(clients) < 2:
             return
@@ -77,6 +83,8 @@ class SyncGroup:
             )
 
         start_at = now + (player_start_delay + SYNC_START_DELAY) / 1000
+        self.next_check = start_at + SYNC_START_HOLDOFF
+        self._settled_after = start_at + SYNC_PLAYPOINT_SETTLE
 
         for client in clients:
             target = start_at - (client.start_delay + client.play_delay) / 1000
@@ -115,7 +123,6 @@ class SyncGroup:
         :param paused_at: The song position (seconds) at which the group was paused.
         :param now: Optional server time override (for testing).
         """
-        self._deviating.clear()
         clients = list(clients)
         now = now if now is not None else time.monotonic()
 
@@ -125,6 +132,8 @@ class SyncGroup:
             return
 
         start_at_base = now + SYNC_START_DELAY / 1000
+        self.next_check = start_at_base + SYNC_RESUME_HOLDOFF
+        self._settled_after = start_at_base + SYNC_PLAYPOINT_SETTLE
         for client in clients:
             start_at = start_at_base - client.play_delay / 1000
             play_point = client.play_point
@@ -137,8 +146,6 @@ class SyncGroup:
             )
             await client.start_at(start_at)
 
-        self.next_check = start_at_base + SYNC_RESUME_HOLDOFF
-
     async def check(
         self,
         clients: Iterable[SlimClient],
@@ -148,8 +155,10 @@ class SyncGroup:
         Correct drift between players (port of ``_CheckSync``).
 
         A player is only corrected once two consecutive checks, on new play points
-        of both the player and the reference, find it off on the same side.
-        Nothing is checked while a player is paused or stopped.
+        of both the player and the reference, find it off on the same side. The
+        first check after a start or resume corrects at once, on play points from
+        after the first second of playback. Nothing is checked while a player is
+        paused or stopped.
         """
         clients = [c for c in clients if c.maintain_sync]
         if len(clients) < 2:
@@ -169,8 +178,11 @@ class SyncGroup:
         self.next_check = now + CHECK_SYNC_INTERVAL
         previous, self._deviating = self._deviating, {}
 
-        # need a recent play-point from all players, otherwise give up
-        recent_threshold = now - PLAYPOINT_RECENT_THRESHOLD
+        # need a recent play-point from all players, otherwise give up; the first
+        # check after a start or resume skips those from the first second of playback
+        recent_threshold = max(
+            now - PLAYPOINT_RECENT_THRESHOLD, self._settled_after or 0.0
+        )
         play_points: list[tuple[SlimClient, float]] = []
         status_times: dict[str, float] = {}
         for client in clients:
@@ -190,6 +202,8 @@ class SyncGroup:
                 return
         if not play_points:
             return
+        first_check = self._settled_after is not None
+        self._settled_after = None
 
         if LOGGER.isEnabledFor(logging.DEBUG):
             first = play_points[0][1]
@@ -226,7 +240,9 @@ class SyncGroup:
             # Deliberate deviation from _CheckSync, which corrects on a single play
             # point: one noisy reading would trigger an audible skip, so wait until
             # the next check confirms the deviation on the same side, from new
-            # readings of both this player and the reference.
+            # readings of both this player and the reference. The first check after
+            # a start or resume skips readings from the first second of playback, so
+            # it corrects a member that started off right away.
             behind = index < reference
             reading = (
                 behind,
@@ -234,7 +250,7 @@ class SyncGroup:
                 status_times[reference_client.player_id],
             )
             last = previous.get(client.player_id)
-            if (
+            if not first_check and (
                 last is None
                 or last[0] != behind
                 or last[1] == reading[1]
