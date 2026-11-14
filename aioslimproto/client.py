@@ -638,8 +638,10 @@ class SlimClient:
         # power on if we're not already powered
         if not self._powered:
             await self.power(powered=True)
-        # set state to buffering when we send the play request
-        self._state = PlayerState.BUFFERING
+        # a gapless handoff queues the stream behind the current track, which keeps
+        # playing (or stays paused) until the new stream starts (STMs)
+        if send_flush or self._state == PlayerState.STOPPED:
+            self._state = PlayerState.BUFFERING
 
         # extract host and port from uri
         parsed_uri = urlparse(url)
@@ -1053,8 +1055,6 @@ class SlimClient:
         # srtm-s command received. Guaranteed to be the first response to an strm-s.
         self._stmc_seen = True
         self._awaiting_stmc = False
-        self._state = PlayerState.BUFFERING
-        self.signal_update()
 
     def _process_stat_stmd(self, data: bytes) -> None:
         """Process incoming stat STMd message (decoder ready)."""
