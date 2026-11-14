@@ -245,6 +245,41 @@ class TestGaplessHandoffState:
         assert live_client.state == PlayerState.BUFFERING
 
 
+class TestEnqueueNeverFlushes:
+    """An enqueued track goes after the current one, whatever send_flush says."""
+
+    @pytest.mark.asyncio
+    async def test_stored_enqueue_keeps_the_current_track(
+        self, live_client: SlimClient
+    ) -> None:
+        """An enqueue with the default send_flush leaves the playing track alone."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        live_client._elapsed_milliseconds = 42_000  # noqa: SLF001
+
+        await live_client.play_url(url="http://127.0.0.1:8080/next.mp3", enqueue=True)
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        assert live_client.next_media is not None
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.elapsed_milliseconds >= 42_000
+
+    @pytest.mark.asyncio
+    async def test_enqueue_after_stmd_starts_without_flushing(
+        self, live_client: SlimClient
+    ) -> None:
+        """An enqueue that starts right away only adds the next stream."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        live_client._elapsed_milliseconds = 42_000  # noqa: SLF001
+        live_client._process_stat_stmd(b"")  # noqa: SLF001
+
+        await live_client.play_url(url="http://127.0.0.1:8080/next.mp3", enqueue=True)
+
+        live_client._send_strm.assert_called_once()  # noqa: SLF001
+        assert live_client._send_strm.call_args.kwargs["command"] == b"s"  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.elapsed_milliseconds >= 42_000
+
+
 class TestStopInvalidatesEnqueuedMedia:
     """An explicit stop() must not be overridden by a late STMu."""
 
