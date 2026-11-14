@@ -1174,16 +1174,22 @@ class SlimProtoCLI:
     async def _handle_pause(
         self,
         player_id: str,
-        force: int = 0,
+        value: int | None = None,
         *args,
         **kwargs,
     ) -> None:
-        """Handle player `stop` command."""
-        if player := self.server.get_player(player_id):
-            if player.state == PlayerState.PLAYING:
-                await player.pause()
-            else:
-                await player.play()
+        """Handle player `pause` command."""
+        # <playerid> pause <0|1|>
+        # Use 1 to pause, 0 to unpause and no parameter to toggle the pause state.
+        player = self.server.get_player(player_id)
+        if not player:
+            return
+        if value is None:
+            await player.toggle_pause()
+        elif value:
+            await player.pause()
+        else:
+            await player.play()
 
     async def _handle_mode(
         self,
@@ -1196,7 +1202,8 @@ class SlimProtoCLI:
         if subcommand == "play":
             return await self._handle_play(player_id, *args, **kwargs)
         if subcommand == "pause":
-            return await self._handle_pause(player_id, *args, **kwargs)
+            # unlike a bare `pause`, `mode pause` never toggles
+            return await self._handle_pause(player_id, 1)
         if subcommand == "stop":
             return await self._handle_stop(player_id, *args, **kwargs)
 
