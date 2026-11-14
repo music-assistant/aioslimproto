@@ -50,8 +50,9 @@ class SyncGroup:
         # time of the reference's play point), for each player outside the deadband
         # on the previous check
         self._deviating: dict[str, tuple[bool, float, float]] = {}
-        # start instant of the last start or resume, until the first check after it
-        self._started_at: float | None = None
+        # end of the holdoff after the last start or resume, until the first check
+        # after it
+        self._holdoff_until: float | None = None
 
     async def start(
         self,
@@ -81,8 +82,8 @@ class SyncGroup:
             )
 
         start_at = now + (player_start_delay + SYNC_START_DELAY) / 1000
-        self._started_at = start_at
-        self.next_check = start_at + SYNC_START_HOLDOFF
+        self._holdoff_until = start_at + SYNC_START_HOLDOFF
+        self.next_check = self._holdoff_until
 
         for client in clients:
             target = start_at - (client.start_delay + client.play_delay) / 1000
@@ -130,8 +131,8 @@ class SyncGroup:
             return
 
         start_at_base = now + SYNC_START_DELAY / 1000
-        self._started_at = start_at_base
-        self.next_check = start_at_base + SYNC_RESUME_HOLDOFF
+        self._holdoff_until = start_at_base + SYNC_RESUME_HOLDOFF
+        self.next_check = self._holdoff_until
         for client in clients:
             start_at = start_at_base - client.play_delay / 1000
             play_point = client.play_point
@@ -155,7 +156,8 @@ class SyncGroup:
         A player is only corrected once two consecutive checks, on new play points
         of both the player and the reference, find it off on the same side. The
         first check after a start or resume corrects at once, on play points
-        reported since then. Nothing is checked while a player is paused or stopped.
+        reported after its holdoff. Nothing is checked while a player is paused or
+        stopped.
         """
         clients = [c for c in clients if c.maintain_sync]
         if len(clients) < 2:
@@ -175,10 +177,10 @@ class SyncGroup:
         self.next_check = now + CHECK_SYNC_INTERVAL
         previous, self._deviating = self._deviating, {}
 
-        # need a recent play-point from all players, otherwise give up; after a start
-        # or resume, a play point from before it (e.g. taken while paused) is stale
+        # need a recent play-point from all players, otherwise give up; the first
+        # check after a start or resume only takes play points from after its holdoff
         recent_threshold = max(
-            now - PLAYPOINT_RECENT_THRESHOLD, self._started_at or 0.0
+            now - PLAYPOINT_RECENT_THRESHOLD, self._holdoff_until or 0.0
         )
         play_points: list[tuple[SlimClient, float]] = []
         status_times: dict[str, float] = {}
@@ -199,8 +201,8 @@ class SyncGroup:
                 return
         if not play_points:
             return
-        first_check = self._started_at is not None
-        self._started_at = None
+        first_check = self._holdoff_until is not None
+        self._holdoff_until = None
 
         if LOGGER.isEnabledFor(logging.DEBUG):
             first = play_points[0][1]
@@ -238,8 +240,8 @@ class SyncGroup:
             # point: one noisy reading would trigger an audible skip, so wait until
             # the next check confirms the deviation on the same side, from new
             # readings of both this player and the reference. The first check after
-            # a start or resume runs after a holdoff, on readings from after the
-            # start, so it corrects a member that started off right away.
+            # a start or resume only takes readings from after its holdoff, so it
+            # corrects a member that started off right away.
             behind = index < reference
             reading = (
                 behind,
