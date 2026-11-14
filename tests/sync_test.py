@@ -344,7 +344,7 @@ class TestSyncStart:
         for client, apparent in ((first, 8000.0), (second, 8000.25)):
             client.min_sync_adjust = 10
             client._state = PlayerState.PLAYING  # noqa: SLF001
-            _set_play_point(client, now + 1.9, apparent)
+            _set_play_point(client, now + 2.25, apparent)
         group = SyncGroup()
         await group.start([first, second], now=now)
         second._send_strm.reset_mock()  # noqa: SLF001
@@ -472,8 +472,8 @@ class TestSyncResume:
         for client in (first, second):
             client._state = PlayerState.PLAYING  # noqa: SLF001
         # the second player is now 250ms behind
-        _set_play_point(first, now + 1.9, 8000.0)
-        _set_play_point(second, now + 1.9, 8000.25)
+        _set_play_point(first, now + 2.25, 8000.0)
+        _set_play_point(second, now + 2.25, 8000.25)
 
         await group.check([first, second], now=now + 1.0)
         await group.check([first, second], now=now + 2.1)
@@ -756,7 +756,7 @@ class TestCheckSync:
         first._send_strm.reset_mock()  # noqa: SLF001
         second._send_strm.reset_mock()  # noqa: SLF001
 
-        await self._check_again(group, first, second, 8000.25)
+        await self._check_after_holdoff(group, first, second, 8000.25)
 
         call_args = second._send_strm.call_args  # noqa: SLF001
         assert call_args.args[0] == b"a"
@@ -764,19 +764,22 @@ class TestCheckSync:
         first._send_strm.assert_not_called()  # noqa: SLF001
 
     @begin_group
-    async def test_first_check_after_a_start_skips_earlier_play_points(
-        self, make_client: MakeClient, begin: Callable
+    @pytest.mark.parametrize(
+        "reported", [-0.2, 0.5], ids=["before-start", "first-second"]
+    )
+    async def test_first_check_after_a_start_skips_early_play_points(
+        self, make_client: MakeClient, begin: Callable, reported: float
     ) -> None:
-        """A play point from before a start is not used for a correction."""
+        """A play point from before the holdoff ended is not used for a correction."""
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.25, now)
         group = SyncGroup()
         await begin(group, [first, second], now)
         second._send_strm.reset_mock()  # noqa: SLF001
-        later = group.next_check
+        later = group.next_check + 0.3
         _set_play_point(first, later - 0.2, 8000.0)
-        # still recent, but taken before the start (e.g. while paused)
-        _set_play_point(second, now - 0.2, 8000.25)
+        # still recent, but taken while paused or in the first second of playback
+        _set_play_point(second, now + reported, 8000.25)
 
         await group.check([first, second], now=later)
         second._send_strm.assert_not_called()  # noqa: SLF001
@@ -795,12 +798,22 @@ class TestCheckSync:
         await begin(group, [first, second], now)
         second._send_strm.reset_mock()  # noqa: SLF001
 
-        await self._check_again(group, first, second, 8000.005)
+        await self._check_after_holdoff(group, first, second, 8000.005)
         await self._check_again(group, first, second, 8000.25)
         second._send_strm.assert_not_called()  # noqa: SLF001
 
         await self._check_again(group, first, second, 8000.25)
         second._send_strm.assert_called_once()  # noqa: SLF001
+
+    @staticmethod
+    async def _check_after_holdoff(
+        group: SyncGroup, first: SlimClient, second: SlimClient, apparent_b: float
+    ) -> None:
+        """Run the first check after a start, on play points from after its holdoff."""
+        later = group.next_check + 0.3
+        _set_play_point(first, later - 0.2, 8000.0)
+        _set_play_point(second, later - 0.2, apparent_b)
+        await group.check([first, second], now=later)
 
     @staticmethod
     async def _check_again(
