@@ -423,10 +423,19 @@ class TestRedirect:
         )
 
 
-def _stmt_payload(jiffies: int) -> bytes:
-    """Build an STMt STAT payload with the given player clock."""
+def _stmt_payload(jiffies: int, elapsed_ms: int = 0) -> bytes:
+    """Build an STMt STAT payload with the given player clock and song position."""
     return b"STMt" + struct.pack(
-        "!BBBLLLLHLLLLHLL", 0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, 0, 0, 0, 0
+        "!BBBLLLLHLLLLHLL",
+        *(0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, elapsed_ms // 1000, 0, elapsed_ms, 0),
+    )
+
+
+def _stmp_payload(jiffies: int, elapsed_ms: int) -> bytes:
+    """Build an STMp STAT payload with the given player clock and song position."""
+    return b"STMp" + struct.pack(
+        "!BBBLLLLHLLLLHLL",
+        *(0, 0, 0, 0, 0, 0, 0, 0, jiffies, 0, 0, elapsed_ms // 1000, 0, elapsed_ms, 0),
     )
 
 
@@ -445,7 +454,7 @@ class TestJiffies:
         self, live_client: SlimClient, now: list[float]
     ) -> None:
         """A flush (new track or seek) doesn't move the player clock."""
-        await live_client._process_stat(_stmt_payload(40_000))  # noqa: SLF001
+        await live_client._process_stat(_stmt_payload(40_000), received=0.0)  # noqa: SLF001
         now[0] += 0.5
         await live_client.play_url(url=_TRACK_URL, autostart=False, send_flush=True)
         now[0] += 0.25
@@ -457,9 +466,9 @@ class TestJiffies:
         self, live_client: SlimClient, now: list[float]
     ) -> None:
         """A stream start (STMs) doesn't move the player clock."""
-        await live_client._process_stat(_stmt_payload(40_000))  # noqa: SLF001
+        await live_client._process_stat(_stmt_payload(40_000), received=0.0)  # noqa: SLF001
         now[0] += 0.8
-        await live_client._process_stat(b"STMs" + bytes(47))  # noqa: SLF001
+        await live_client._process_stat(b"STMs" + bytes(47), received=0.0)  # noqa: SLF001
         now[0] += 0.1
 
         assert live_client.jiffies == 40_900
@@ -693,13 +702,71 @@ class TestPositionAcrossPauseAndResume:
     async def test_a_pause_made_on_the_player_holds_the_position_too(
         self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A pause the player started itself holds the position as well."""
+        """A pause the player started itself holds the position it reports."""
         clock = self._clock(monkeypatch, 100.4)
         self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
-        await live_client._process_stat_stmp(b"")  # noqa: SLF001
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
         clock[0] = 108.0
         assert live_client.state == PlayerState.PAUSED
-        assert live_client.elapsed_milliseconds == 10_400
+        assert live_client.elapsed_milliseconds == 10_350
+
+    @pytest.mark.asyncio
+    async def test_the_pause_confirmation_sets_the_play_point(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The paused position the player reports is the play point's song position."""
+        self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        live_client._jiffies_epoch = 0.0  # noqa: SLF001
+        live_client.packet_latency = 0.0
+        await live_client.pause()
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        assert live_client.play_point == pytest.approx((200.0, 189.65, 10.35))
+
+    @pytest.mark.asyncio
+    async def test_a_heartbeat_while_paused_keeps_the_paused_position(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A heartbeat during the pause moves the player clock, not the position."""
+        self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        live_client._jiffies_epoch = 0.0  # noqa: SLF001
+        live_client.packet_latency = 0.0
+        await live_client.pause()
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        # squeezelite extrapolates its frozen position from a stale status copy
+        await live_client._process_stat(_stmt_payload(203_000, 10_440), received=0.0)  # noqa: SLF001
+        assert live_client.jiffies == 203_000
+        assert live_client.elapsed_milliseconds == 10_350
+        assert live_client.play_point is not None
+        assert live_client.play_point[2] == pytest.approx(10.35)
+
+    @pytest.mark.asyncio
+    async def test_a_heartbeat_after_the_resume_sets_the_position_again(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once the player confirms the resume, its heartbeats report the position."""
+        self._clock(monkeypatch, 100.4)
+        self._playing(live_client, elapsed_ms=10_000, reported_at=100.0)
+        live_client._jiffies_epoch = 0.0  # noqa: SLF001
+        live_client.packet_latency = 0.0
+        await live_client.pause()
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+        await live_client._process_stat(_stmt_payload(206_000, 11_350), received=0.0)  # noqa: SLF001
+        assert live_client.elapsed_milliseconds == 11_350
+        assert live_client.play_point is not None
+        assert live_client.play_point[2] == pytest.approx(11.35)
+
+    @pytest.mark.asyncio
+    async def test_a_pause_during_a_stream_switch_keeps_the_position_at_zero(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pause confirmation still reporting the flushed stream is not shown."""
+        self._clock(monkeypatch, 100.4)
+        await live_client.play_url(url=_TRACK_URL, autostart=False, send_flush=True)
+        await live_client._process_stat(_stmp_payload(200_000, 10_350), received=0.0)  # noqa: SLF001
+        assert live_client.elapsed_milliseconds == 0
 
     @pytest.mark.asyncio
     async def test_a_resume_made_on_the_player_restarts_the_clock(

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Any, NotRequired, TypedDict
 
+from .const import DEFAULT_MIN_SYNC_ADJUST, SQUEEZEBOX2_MIN_SYNC_ADJUST
+
 
 class EventType(Enum):
     """Enum with possible slim proto client events."""
@@ -63,6 +65,43 @@ SQUEEZEPLAY_VOLUME_PLAYER_TYPES: frozenset[str] = frozenset(
         "boom",
     }
 )
+
+# Player types LMS drives with Slim::Player::Squeezebox2 or a subclass of it
+# (Transporter, Receiver, Boom, SoftSqueeze, SqueezePlay; the SqueezeESP32 plugin
+# subclasses SqueezePlay), which inherit its tighter minSyncAdjust (10ms). The SB1
+# ("squeezebox"), SqueezeSlave and unknown devices keep the Player.pm base (30ms).
+# Squeezelite reports dev_id 12 ("squeezeplay"), the Squeezebox Radio/Touch report
+# dev_id 9 ("controller").
+SQUEEZEBOX2_PLAYER_TYPES: frozenset[str] = frozenset(
+    {
+        "squeezebox2",
+        "transporter",
+        "receiver",
+        "boom",
+        "softsqueeze",
+        "softsqueeze3",
+        "softboom",
+        "controller",
+        "squeezeplay",
+        "squeezeesp32",
+    }
+)
+
+
+def min_sync_adjust_for(device_type: str) -> int:
+    """
+    Return the LMS ``minSyncAdjust`` (ms) for a player device type.
+
+    Mirrors the LMS player class of the device type: Squeezebox2 and its
+    subclasses use the tighter Squeezebox2.pm value, all others the Player.pm base.
+
+    :param device_type: The device type name resolved from the HELO ``dev_id``.
+    """
+    return (
+        SQUEEZEBOX2_MIN_SYNC_ADJUST
+        if device_type in SQUEEZEBOX2_PLAYER_TYPES
+        else DEFAULT_MIN_SYNC_ADJUST
+    )
 
 
 class PlayerState(Enum):
