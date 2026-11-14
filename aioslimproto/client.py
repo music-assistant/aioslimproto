@@ -587,7 +587,8 @@ class SlimClient:
         - enqueue: enqueue this url to play after the current URL finished.
         - autostart: advanced option to not auto start playback,
           but wait for the buffer to be full.
-        - send_flush: advanced option to flush the buffer before playback.
+        - send_flush: advanced option to flush the buffer before playback,
+          ignored when enqueuing.
         - stream_threshold: advanced option to set how much stream data (in KB, 0-255)
           the player buffers before it autostarts or reports the buffer ready.
         - output_threshold: advanced option to set how much decoded audio
@@ -598,6 +599,7 @@ class SlimClient:
         if not url.startswith("http"):
             raise UnsupportedContentType(f"Invalid URL: {url}")  # noqa: TRY003
 
+        send_flush = send_flush and not enqueue
         if send_flush:
             # flush buffers before playback of a new track
             await self._send_strm(b"f", autostart=b"0")
