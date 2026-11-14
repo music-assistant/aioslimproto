@@ -423,6 +423,39 @@ class TestRedirect:
         )
 
 
+class TestOutputUnderrun:
+    """A player that ran out of audio (STMo) is resumed."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("autostart", [False, True])
+    async def test_resumes_the_player(
+        self, live_client: SlimClient, *, autostart: bool
+    ) -> None:
+        """The player is unpaused, however its stream was started."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        live_client._auto_play = autostart  # noqa: SLF001
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+
+        live_client._send_strm.assert_awaited_once_with(b"u", replay_gain=0)  # noqa: SLF001
+        underrun = call(live_client, EventType.PLAYER_OUTPUT_UNDERRUN)
+        assert underrun in live_client.callback.mock_calls
+        assert live_client.state == PlayerState.PLAYING
+
+    @pytest.mark.asyncio
+    async def test_leaves_a_starting_stream_alone(
+        self, live_client: SlimClient
+    ) -> None:
+        """An underrun while a new stream starts up is left alone."""
+        live_client._state = PlayerState.BUFFERING  # noqa: SLF001
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        underrun = call(live_client, EventType.PLAYER_OUTPUT_UNDERRUN)
+        assert underrun not in live_client.callback.mock_calls
+
+
 def _stmt_payload(jiffies: int, elapsed_ms: int = 0) -> bytes:
     """Build an STMt STAT payload with the given player clock and song position."""
     return b"STMt" + struct.pack(
