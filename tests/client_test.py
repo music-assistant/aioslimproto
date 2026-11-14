@@ -527,10 +527,31 @@ class TestRedirect:
             media.metadata,
             media.transition,
             media.transition_duration,
+            send_flush=False,
             stream_threshold=media.stream_threshold,
             output_threshold=media.output_threshold,
             autostart=autostart,
         )
+
+    @pytest.mark.asyncio
+    async def test_redirect_during_gapless_handoff_keeps_playing(
+        self, live_client: SlimClient
+    ) -> None:
+        """Redirecting the next track's stream doesn't stop the current track."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        live_client._elapsed_milliseconds = 42_000  # noqa: SLF001
+        await live_client.play_url(url=_TRACK_URL, send_flush=False)
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await live_client._process_resp(  # noqa: SLF001
+            b"HTTP/1.0 302 Found\r\nLocation: http://127.0.0.1:8081/track.wav\r\n\r\n"
+        )
+
+        live_client._send_strm.assert_called_once()  # noqa: SLF001
+        assert live_client._send_strm.call_args.kwargs["command"] == b"s"  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.elapsed_milliseconds >= 42_000
 
 
 class TestOutputUnderrun:

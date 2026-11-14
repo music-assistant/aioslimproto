@@ -1244,12 +1244,15 @@ class SlimClient:
             # handle redirect
             location = headers["location"]
             self.logger.debug("Received redirect to %s", location)
+            # only the stream being set up is replaced: any flush was done when it was
+            # requested, and during a gapless handoff the current track must play on
             await self.play_url(
                 location,
                 self._buffering_media.mime_type,
                 self._buffering_media.metadata,
                 self._buffering_media.transition,
                 self._buffering_media.transition_duration,
+                send_flush=False,
                 stream_threshold=self._buffering_media.stream_threshold,
                 output_threshold=self._buffering_media.output_threshold,
                 autostart=self._auto_play,
