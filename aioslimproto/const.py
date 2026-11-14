@@ -45,9 +45,12 @@ DEFAULT_START_DELAY = 0  # ms
 
 # StreamingController::_syncStart
 SYNC_START_DELAY = 200  # ms
-# Deliberate deviation from _syncStart, which holds off no sync check: play points
-# from the first second of playback can be far off
+# Deliberate deviation from _syncStart, which holds off no sync check: gives every
+# player time to report a play point from after SYNC_PLAYPOINT_SETTLE
 SYNC_START_HOLDOFF = 2.0  # s
+# the first sync check after a start or resume skips play points from the first
+# second of playback, which can be far off
+SYNC_PLAYPOINT_SETTLE = 1.0  # s
 
 # StreamingController::_Resume: nextCheckSyncTime = startAtBase + SYNC_RESUME_HOLDOFF
 SYNC_RESUME_HOLDOFF = 2.0  # s

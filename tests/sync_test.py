@@ -745,8 +745,11 @@ class TestCheckSync:
         second._send_strm.assert_not_called()  # noqa: SLF001
 
     @begin_group
+    @pytest.mark.parametrize(
+        "reported", [1.5, 2.3], ids=["before-holdoff", "after-holdoff"]
+    )
     async def test_first_check_after_a_start_corrects_at_once(
-        self, make_client: MakeClient, begin: Callable
+        self, make_client: MakeClient, begin: Callable, reported: float
     ) -> None:
         """A player found off on the first check after a start is corrected at once."""
         now = 9000.0
@@ -755,8 +758,11 @@ class TestCheckSync:
         await begin(group, [first, second], now)
         first._send_strm.reset_mock()  # noqa: SLF001
         second._send_strm.reset_mock()  # noqa: SLF001
+        later = group.next_check + 0.3
+        _set_play_point(first, later - 0.2, 8000.0)
+        _set_play_point(second, now + reported, 8000.25)
 
-        await self._check_after_holdoff(group, first, second, 8000.25)
+        await group.check([first, second], now=later)
 
         call_args = second._send_strm.call_args  # noqa: SLF001
         assert call_args.args[0] == b"a"
@@ -765,12 +771,12 @@ class TestCheckSync:
 
     @begin_group
     @pytest.mark.parametrize(
-        "reported", [-0.2, 0.5], ids=["before-start", "first-second"]
+        "reported", [-0.2, 1.1], ids=["before-start", "first-second"]
     )
     async def test_first_check_after_a_start_skips_early_play_points(
         self, make_client: MakeClient, begin: Callable, reported: float
     ) -> None:
-        """A play point from before the holdoff ended is not used for a correction."""
+        """A play point from the first second after a start is not used to correct."""
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.25, now)
         group = SyncGroup()
@@ -809,7 +815,7 @@ class TestCheckSync:
     async def _check_after_holdoff(
         group: SyncGroup, first: SlimClient, second: SlimClient, apparent_b: float
     ) -> None:
-        """Run the first check after a start, on play points from after its holdoff."""
+        """Run the first check after a start, on fresh play points."""
         later = group.next_check + 0.3
         _set_play_point(first, later - 0.2, 8000.0)
         _set_play_point(second, later - 0.2, apparent_b)
