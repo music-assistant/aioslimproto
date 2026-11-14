@@ -1073,20 +1073,19 @@ class SlimClient:
         """Process incoming stat STMf message (connection closed)."""
         self.logger.debug("STMf received - connection closed.")
 
-    def _process_stat_stmo(self, data: bytes) -> None:
+    async def _process_stat_stmo(self, data: bytes) -> None:
         """
         Process incoming stat STMo message.
 
-        No more decoded (uncompressed) data to play; triggers rebuffering.
+        No more decoded (uncompressed) data to play; the stream can't keep up.
         """
         self.logger.debug("STMo received - output underrun.")
         if self.state == PlayerState.BUFFERING:
             return  # transitioning
-        self._state = PlayerState.BUFFERING
-        if self._auto_play:
-            asyncio.create_task(self.play())
-        else:
-            self.callback(self, EventType.PLAYER_OUTPUT_UNDERRUN)
+        self.callback(self, EventType.PLAYER_OUTPUT_UNDERRUN)
+        # SqueezePlay players (e.g. Squeezebox Radio) pause on an underrun until the
+        # server resumes them; squeezelite plays on by itself and just confirms (STMr)
+        await self.unpause_at(0)
 
     def _hold_elapsed(self) -> None:
         """Freeze the extrapolated position so it stays put while not playing."""

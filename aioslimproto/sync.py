@@ -155,8 +155,8 @@ class SyncGroup:
         if len(clients) < 2:
             return
         # A paused or stopped player's play point pairs a fresh clock with a frozen
-        # position, so its apparent start moves with time. A player that rebuffers
-        # after an underrun stays BUFFERING while it plays on, so it is checked.
+        # position, so its apparent start moves with time. A player that is BUFFERING
+        # the next track still plays the current one, so it is checked.
         if any(
             client.state not in (PlayerState.PLAYING, PlayerState.BUFFERING)
             for client in clients

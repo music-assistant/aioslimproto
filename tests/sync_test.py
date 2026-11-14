@@ -565,10 +565,10 @@ class TestCheckSync:
         first._send_strm.assert_not_called()  # noqa: SLF001
         second._send_strm.assert_not_called()  # noqa: SLF001
 
-    async def test_catches_up_a_player_that_plays_on_after_an_underrun(
+    async def test_catches_up_a_player_buffering_the_next_track(
         self, make_client: MakeClient
     ) -> None:
-        """A player still marked as rebuffering after an underrun is corrected."""
+        """A player that buffers the next track while it plays on is corrected."""
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.25, now)
         second._state = PlayerState.BUFFERING  # noqa: SLF001
