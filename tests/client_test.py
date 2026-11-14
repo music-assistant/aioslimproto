@@ -443,11 +443,22 @@ class TestOutputUnderrun:
         assert live_client.state == PlayerState.PLAYING
 
     @pytest.mark.asyncio
-    async def test_leaves_a_starting_stream_alone(
+    async def test_resumes_the_player_during_a_gapless_handoff(
         self, live_client: SlimClient
     ) -> None:
-        """An underrun while a new stream starts up is left alone."""
-        live_client._state = PlayerState.BUFFERING  # noqa: SLF001
+        """An underrun while the next track buffers resumes the player too."""
+        await live_client.play_url(url=_TRACK_URL, send_flush=False)
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+
+        live_client._send_strm.assert_awaited_once_with(b"u", replay_gain=0)  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_ignores_the_flushed_stream(self, live_client: SlimClient) -> None:
+        """A late underrun of the flushed stream doesn't start the new one early."""
+        await live_client.play_url(url=_TRACK_URL, autostart=False, send_flush=True)
+        live_client._send_strm.reset_mock()  # noqa: SLF001
 
         await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
 

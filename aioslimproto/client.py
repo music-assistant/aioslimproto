@@ -1080,8 +1080,8 @@ class SlimClient:
         No more decoded (uncompressed) data to play; the stream can't keep up.
         """
         self.logger.debug("STMo received - output underrun.")
-        if self.state == PlayerState.BUFFERING:
-            return  # transitioning
+        if self._awaiting_stream_start:
+            return  # late report of the flushed stream
         self.callback(self, EventType.PLAYER_OUTPUT_UNDERRUN)
         # SqueezePlay players (e.g. Squeezebox Radio) pause on an underrun until the
         # server resumes them; squeezelite plays on by itself and just confirms (STMr)
