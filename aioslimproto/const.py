@@ -45,6 +45,9 @@ DEFAULT_START_DELAY = 0  # ms
 
 # StreamingController::_syncStart
 SYNC_START_DELAY = 200  # ms
+# Deliberate deviation from _syncStart, which holds off no sync check: play points
+# from the first second of playback can be far off
+SYNC_START_HOLDOFF = 2.0  # s
 
 # StreamingController::_Resume: nextCheckSyncTime = startAtBase + SYNC_RESUME_HOLDOFF
 SYNC_RESUME_HOLDOFF = 2.0  # s

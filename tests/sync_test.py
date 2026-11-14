@@ -84,6 +84,16 @@ async def _check_twice(group: SyncGroup, clients: list[SlimClient], now: float) 
     await group.check(clients, now=now)
 
 
+begin_group = pytest.mark.parametrize(
+    "begin",
+    [
+        lambda group, clients, now: group.start(clients, now=now),
+        lambda group, clients, now: group.resume(clients, 1000.0, now=now),
+    ],
+    ids=["start", "resume"],
+)
+
+
 class TestJiffiesEpoch:
     """The min-latency clock estimator (port of trackJiffiesEpoch)."""
 
@@ -324,6 +334,30 @@ class TestSyncStart:
         await SyncGroup().start([only], now=1000.0)
         only._send_strm.assert_not_called()  # noqa: SLF001
 
+    async def test_holds_off_the_sync_check_after_a_start(
+        self, make_client: MakeClient
+    ) -> None:
+        """No correction runs until two seconds after the common start instant."""
+        now = 9000.0
+        first = make_client("a")
+        second = make_client("b")
+        for client, apparent in ((first, 8000.0), (second, 8000.25)):
+            client.min_sync_adjust = 10
+            client._state = PlayerState.PLAYING  # noqa: SLF001
+            _set_play_point(client, now + 2.25, apparent)
+        group = SyncGroup()
+        await group.start([first, second], now=now)
+        second._send_strm.reset_mock()  # noqa: SLF001
+
+        await group.check([first, second], now=now + 1.0)
+        await group.check([first, second], now=now + 2.1)
+        second._send_strm.assert_not_called()  # noqa: SLF001
+
+        await group.check([first, second], now=now + 2.3)
+        call_args = second._send_strm.call_args  # noqa: SLF001
+        assert call_args.args[0] == b"a"
+        assert call_args.kwargs["replay_gain"] == pytest.approx(250, abs=1)
+
     async def test_start_instant_wraps_with_the_player_clock(
         self, make_client: MakeClient
     ) -> None:
@@ -438,19 +472,14 @@ class TestSyncResume:
         for client in (first, second):
             client._state = PlayerState.PLAYING  # noqa: SLF001
         # the second player is now 250ms behind
-        _set_play_point(first, now + 1.9, 8000.0)
-        _set_play_point(second, now + 1.9, 8000.25)
+        _set_play_point(first, now + 2.25, 8000.0)
+        _set_play_point(second, now + 2.25, 8000.25)
 
         await group.check([first, second], now=now + 1.0)
-        for client in (first, second):
-            _shift_reading(client, 1000)
         await group.check([first, second], now=now + 2.1)
         second._send_strm.assert_not_called()  # noqa: SLF001
 
         await group.check([first, second], now=now + 2.3)
-        for client in (first, second):
-            _shift_reading(client, 1000)
-        await group.check([first, second], now=now + 3.3)
         call_args = second._send_strm.call_args  # noqa: SLF001
         assert call_args.args[0] == b"a"
         assert call_args.kwargs["replay_gain"] == pytest.approx(250, abs=1)
@@ -715,35 +744,76 @@ class TestCheckSync:
 
         second._send_strm.assert_not_called()  # noqa: SLF001
 
-    async def test_start_drops_an_unconfirmed_deviation(
-        self, make_client: MakeClient
+    @begin_group
+    async def test_first_check_after_a_start_corrects_at_once(
+        self, make_client: MakeClient, begin: Callable
     ) -> None:
-        """A deviation seen before a group start is not confirmed after it."""
+        """A player found off on the first check after a start is corrected at once."""
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.25, now)
         group = SyncGroup()
-        await group.check([first, second], now=now)
-        await group.start([first, second], now=now + 0.1)
+        await begin(group, [first, second], now)
+        first._send_strm.reset_mock()  # noqa: SLF001
         second._send_strm.reset_mock()  # noqa: SLF001
 
-        await self._check_again(group, first, second, 8000.25)
+        await self._check_after_holdoff(group, first, second, 8000.25)
 
-        second._send_strm.assert_not_called()  # noqa: SLF001
+        call_args = second._send_strm.call_args  # noqa: SLF001
+        assert call_args.args[0] == b"a"
+        assert call_args.kwargs["replay_gain"] == pytest.approx(250, abs=1)
+        first._send_strm.assert_not_called()  # noqa: SLF001
 
-    async def test_resume_drops_an_unconfirmed_deviation(
-        self, make_client: MakeClient
+    @begin_group
+    @pytest.mark.parametrize(
+        "reported", [-0.2, 0.5], ids=["before-start", "first-second"]
+    )
+    async def test_first_check_after_a_start_skips_early_play_points(
+        self, make_client: MakeClient, begin: Callable, reported: float
     ) -> None:
-        """A deviation seen before a group resume is not confirmed after it."""
+        """A play point from before the holdoff ended is not used for a correction."""
         now = 9000.0
         first, second = self._group(make_client, 8000.0, 8000.25, now)
         group = SyncGroup()
-        await group.check([first, second], now=now)
-        await group.resume([first, second], paused_at=1000.0, now=now + 0.1)
+        await begin(group, [first, second], now)
         second._send_strm.reset_mock()  # noqa: SLF001
+        later = group.next_check + 0.3
+        _set_play_point(first, later - 0.2, 8000.0)
+        # still recent, but taken while paused or in the first second of playback
+        _set_play_point(second, now + reported, 8000.25)
+
+        await group.check([first, second], now=later)
+        second._send_strm.assert_not_called()  # noqa: SLF001
 
         await self._check_again(group, first, second, 8000.25)
+        second._send_strm.assert_called_once()  # noqa: SLF001
 
+    @begin_group
+    async def test_later_checks_after_a_start_need_a_confirmation(
+        self, make_client: MakeClient, begin: Callable
+    ) -> None:
+        """After the first check following a start, a deviation is confirmed first."""
+        now = 9000.0
+        first, second = self._group(make_client, 8000.0, 8000.25, now)
+        group = SyncGroup()
+        await begin(group, [first, second], now)
+        second._send_strm.reset_mock()  # noqa: SLF001
+
+        await self._check_after_holdoff(group, first, second, 8000.005)
+        await self._check_again(group, first, second, 8000.25)
         second._send_strm.assert_not_called()  # noqa: SLF001
+
+        await self._check_again(group, first, second, 8000.25)
+        second._send_strm.assert_called_once()  # noqa: SLF001
+
+    @staticmethod
+    async def _check_after_holdoff(
+        group: SyncGroup, first: SlimClient, second: SlimClient, apparent_b: float
+    ) -> None:
+        """Run the first check after a start, on play points from after its holdoff."""
+        later = group.next_check + 0.3
+        _set_play_point(first, later - 0.2, 8000.0)
+        _set_play_point(second, later - 0.2, apparent_b)
+        await group.check([first, second], now=later)
 
     @staticmethod
     async def _check_again(
