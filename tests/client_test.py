@@ -679,6 +679,24 @@ class TestClearMedia:
         assert live_client.next_media is None
 
     @pytest.mark.asyncio
+    async def test_a_late_redirect_of_a_forgotten_stream_starts_nothing(
+        self, live_client: SlimClient
+    ) -> None:
+        """A redirect that arrives after its stream was forgotten is ignored."""
+        await live_client.play_url(url=_TRACK_URL, metadata={"title": "One"})
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.stop()
+        await live_client.clear_media()
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await live_client._process_resp(  # noqa: SLF001
+            b"HTTP/1.0 302 Found\r\nLocation: http://127.0.0.1:8081/track.wav\r\n\r\n"
+        )
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        assert live_client.current_media is None
+
+    @pytest.mark.asyncio
     async def test_a_player_without_media_has_nothing_to_forget(
         self, live_client: SlimClient
     ) -> None:

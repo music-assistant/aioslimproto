@@ -1321,6 +1321,12 @@ class SlimClient:
         headers = parse_headers(data)
 
         if "location" in headers:
+            if (media := self._buffering_media) is None:
+                # the stream this redirect is for was given up while it was set up
+                self.logger.debug(
+                    "Ignoring redirect of a stream that is not wanted anymore."
+                )
+                return
             # handle redirect
             location = headers["location"]
             self.logger.debug("Received redirect to %s", location)
@@ -1328,13 +1334,13 @@ class SlimClient:
             # requested, and during a gapless handoff the current track must play on
             await self.play_url(
                 location,
-                self._buffering_media.mime_type,
-                self._buffering_media.metadata,
-                self._buffering_media.transition,
-                self._buffering_media.transition_duration,
+                media.mime_type,
+                media.metadata,
+                media.transition,
+                media.transition_duration,
                 send_flush=False,
-                stream_threshold=self._buffering_media.stream_threshold,
-                output_threshold=self._buffering_media.output_threshold,
+                stream_threshold=media.stream_threshold,
+                output_threshold=media.output_threshold,
                 autostart=self._auto_play,
             )
             return
