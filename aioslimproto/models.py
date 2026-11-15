@@ -33,7 +33,38 @@ class SlimEvent:
 
     type: EventType
     player_id: str
-    data: dict[str, Any] | None = None
+    data: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerStatus:
+    """
+    The timing and buffer fields of a STAT message, as the player reported them.
+
+    :param received: Server time (seconds, on the server clock) at which the
+        message was read from the socket.
+    :param jiffies: Player clock in milliseconds (32-bit, wraps).
+    :param elapsed_seconds: Elapsed time of the playing song, whole seconds.
+    :param elapsed_milliseconds: Elapsed time of the playing song, in milliseconds.
+    :param bytes_received: Bytes of the stream the player received.
+    :param stream_buffer_size: Size of the stream buffer, in bytes.
+    :param stream_buffer_fullness: Bytes in the stream buffer.
+    :param output_buffer_size: Size of the output buffer, in bytes.
+    :param output_buffer_fullness: Bytes in the output buffer.
+    :param server_timestamp: The timestamp of the status request this answers
+        (see :meth:`SlimClient.request_status`); 0 when the player sent it unasked.
+    """
+
+    received: float
+    jiffies: int
+    elapsed_seconds: int
+    elapsed_milliseconds: int
+    bytes_received: int
+    stream_buffer_size: int
+    stream_buffer_fullness: int
+    output_buffer_size: int
+    output_buffer_fullness: int
+    server_timestamp: int
 
 
 # from http://wiki.slimdevices.com/index.php/SlimProtoTCPProtocol#HELO
@@ -50,6 +81,7 @@ DEVICE_TYPE = {
     11: "softboom",
     12: "squeezeplay",
     100: "squeezeesp32",
+    101: "squeezeesp32",
 }
 
 # Player types that use SqueezePlay volume parameters (wider -74dB range with two-slope

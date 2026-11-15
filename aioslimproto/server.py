@@ -36,6 +36,7 @@ class SlimServer:
         control_port: int = SLIMPROTO_PORT,
         cli_command_handler: SlimCLICommandHandler | None = None,
         extra_routes: dict[str, SlimRouteHandler] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         """
         Initialize SlimServer instance.
@@ -62,11 +63,15 @@ class SlimServer:
           server (cli_port_json is not None), and a path of /jsonrpc.js or /cometd raises
           ValueError. The web server listens on all interfaces without authentication: a
           handler must check what it serves itself.
+        - clock: Optional callable returning the current time in seconds. Every server
+          time of the library (receive stamps, the player clock mapping, start_at, play
+          points, SyncGroup) is on this clock. Default is time.monotonic.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
         self.name = name or get_hostname()
         self.control_port = control_port
+        self._clock = clock
         self.cli = SlimProtoCLI(
             self,
             cli_port,
@@ -220,7 +225,7 @@ class SlimServer:
             # forward all other events as-is
             self.signal_event(SlimEvent(event_type, player_id, data))
 
-        SlimClient(reader, writer, client_callback)
+        SlimClient(reader, writer, client_callback, clock=self._clock)
 
     async def __aenter__(self) -> Self:
         """Return Context manager."""

@@ -50,6 +50,7 @@ from .models import (
     MediaDetails,
     MediaMetadata,
     PlayerState,
+    PlayerStatus,
     Preset,
     RemoteCode,
     TransitionType,
@@ -70,9 +71,19 @@ class SlimClient:
         reader: StreamReader,
         writer: StreamWriter,
         callback: Callable[[SlimClient, EventType, Any], None],
+        clock: Callable[[], float] | None = None,
     ) -> None:
-        """Initialize the socket client."""
+        """
+        Initialize the socket client.
+
+        :param reader: The stream reader of the player connection.
+        :param writer: The stream writer of the player connection.
+        :param callback: Called with this client, the event type and its data.
+        :param clock: Returns the current server time in seconds; every server time
+            of this client is on this clock. Defaults to ``time.monotonic``.
+        """
         self.callback = callback
+        self._clock = clock or time.monotonic
         self.logger = logging.getLogger(__name__)
         self.volume_control = SlimProtoVolume()
         self.display_control = SlimProtoDisplay(self)
@@ -290,9 +301,13 @@ class SlimClient:
         """Return the player's jiffies clock rate (1kHz)."""
         return 1000
 
+    def server_time(self) -> float:
+        """Return the current time on the server clock, in seconds."""
+        return self._clock()
+
     @property
     def jiffies_epoch(self) -> float:
-        """Return the offset mapping player jiffies to ``time.monotonic()`` seconds."""
+        """Return the offset mapping player jiffies to server time (seconds)."""
         return self._jiffies_epoch or 0.0
 
     def track_jiffies_epoch(self, jiffies: int, timestamp: float) -> None:
@@ -304,7 +319,7 @@ class SlimClient:
         epoch to follow clock drift.
 
         :param jiffies: The player clock value reported in a status message.
-        :param timestamp: When that message arrived, in ``time.monotonic()`` seconds.
+        :param timestamp: When that message arrived, in server time (seconds).
         """
         jiffies_time = jiffies / self.tics_per_sec
         offset = timestamp - jiffies_time
@@ -334,7 +349,7 @@ class SlimClient:
                 offsets.clear()
 
     def jiffies_to_timestamp(self, jiffies: int) -> float:
-        """Translate a player jiffies value into server time (``time.monotonic()``)."""
+        """Translate a player jiffies value into server time (seconds)."""
         return self.jiffies_epoch + jiffies / self.tics_per_sec - self.packet_latency
 
     @property
@@ -346,7 +361,7 @@ class SlimClient:
         time normalizes away per-player buffer/decoder differences, so two
         players that are in sync share the same value. The song elapsed time is
         used to align a group resume (see :meth:`SyncGroup.resume`).
-        Status time and apparent start are in ``time.monotonic()`` seconds.
+        Status time and apparent start are in server time (seconds).
         """
         if self._jiffies_epoch is None or not self._elapsed_milliseconds:
             return None
@@ -381,7 +396,7 @@ class SlimClient:
             song_elapsed = self._elapsed_seconds + (elapsed_ms % 1000) / 1000
         if self._state == PlayerState.PLAYING and self._jiffies_epoch is not None:
             # extrapolate to "now" using the jiffies -> server-time mapping
-            time_diff = time.monotonic() - self.jiffies_to_timestamp(self._jiffies)
+            time_diff = self._clock() - self.jiffies_to_timestamp(self._jiffies)
             if time_diff > 0:
                 song_elapsed += time_diff
         return song_elapsed
@@ -408,7 +423,7 @@ class SlimClient:
         """
         Unpause the player so it starts at the given server time.
 
-        :param server_time: The start instant, in ``time.monotonic()`` seconds.
+        :param server_time: The start instant, in server time (seconds).
         """
         if self._jiffies_epoch is None:
             # No STMt has set the clock epoch yet; a silent no-op would strand the
@@ -726,6 +741,21 @@ class SlimClient:
         # https://wiki.slimdevices.com/index.php/SlimProto_TCP_protocol.html#u.2C_p.2C_a_.26_t_commands_and_replay_gain_field
         await self._send_strm(b"u", replay_gain=timestamp)
 
+    async def request_status(self, timestamp: int = 0) -> None:
+        """
+        Request the player to report its status (strm t).
+
+        The player answers with a status that is emitted as a ``PLAYER_HEARTBEAT``
+        event carrying a :class:`PlayerStatus`.
+
+        :param timestamp: Unsigned 32-bit value the player echoes back in
+            :attr:`PlayerStatus.server_timestamp`, to match a reply to its request.
+            A status the player sends unasked carries 0 and the periodic heartbeat
+            counts up from 1, so use values apart from those to recognise a reply.
+        """
+        # https://wiki.slimdevices.com/index.php/SlimProto_TCP_protocol.html#u.2C_p.2C_a_.26_t_commands_and_replay_gain_field
+        await self._send_strm(b"t", autostart=b"0", flags=0, replay_gain=timestamp)
+
     def signal_update(self) -> None:
         """Signal a player updated event to listeners."""
         self.callback(self, EventType.PLAYER_UPDATED)
@@ -784,12 +814,7 @@ class SlimClient:
         """Send periodic heartbeat message to player."""
         while self.connected:
             self._last_heartbeat = heartbeat_id = self._last_heartbeat + 1
-            await self._send_strm(
-                b"t",
-                autostart=b"0",
-                flags=0,
-                replay_gain=heartbeat_id,
-            )
+            await self.request_status(heartbeat_id)
             # Don't render display on first heartbeat.
             # Prevents IntegerDivideByZero exception when LED-VU
             # enabled on Squeezelite-ESP32 devices without displays
@@ -809,7 +834,7 @@ class SlimClient:
                 break
             # taken before any handling, so event-loop delay stays out of the
             # player clock mapping
-            received = time.monotonic()
+            received = self._clock()
             # handle incoming data from socket
             buffer = buffer + data
             del data
@@ -1099,7 +1124,7 @@ class SlimClient:
         """Process incoming stat STMp message: Pause confirmed."""
         self.logger.debug("STMp received - pause confirmed.")
         # the player's own paused position, which a group resume aligns on
-        self._store_status(data)
+        self._store_status(self._parse_status(data, self._clock()))
         self._state = PlayerState.PAUSED
         self.signal_update()
         await self._render_display()
@@ -1136,37 +1161,58 @@ class SlimClient:
         # While paused, squeezelite reports its frozen position extrapolated on wall
         # time from a status copy up to ~100 ms old, so keep the position of the
         # pause confirmation (STMp), which a group resume aligns on.
-        self._store_status(data, position=self._state != PlayerState.PAUSED)
+        status = self._parse_status(data, received)
+        self._store_status(status, position=self._state != PlayerState.PAUSED)
         self._last_timestamp = self._jiffies_timestamp
         self.track_jiffies_epoch(self._jiffies, received)
-        self.callback(self, EventType.PLAYER_HEARTBEAT)
+        self.callback(self, EventType.PLAYER_HEARTBEAT, status)
 
-    def _store_status(self, data: bytes, *, position: bool = True) -> None:
+    @staticmethod
+    def _parse_status(data: bytes, received: float) -> PlayerStatus:
         """
-        Store the player clock and song position reported in a STAT message.
+        Parse the status fields of a STAT message.
 
         :param data: The STAT message payload.
-        :param position: Whether to store the song position too, not just the clock.
+        :param received: When the message was read, in server time (seconds).
         """
         (
             _num_crlf,
             _mas_initialized,
             _mas_mode,
-            _rptr,
-            _wptr,
-            _bytes_received_h,
-            _bytes_received_l,
+            stream_buffer_size,
+            stream_buffer_fullness,
+            bytes_received_h,
+            bytes_received_l,
             _signal_strength,
             jiffies,
-            _output_buffer_size,
-            _output_buffer_readyness,
+            output_buffer_size,
+            output_buffer_fullness,
             elapsed_seconds,
             _voltage,
             elapsed_milliseconds,
-            _server_heartbeat,
+            server_timestamp,
         ) = struct.unpack("!BBBLLLLHLLLLHLL", data[:47])
+        return PlayerStatus(
+            received=received,
+            jiffies=jiffies,
+            elapsed_seconds=elapsed_seconds,
+            elapsed_milliseconds=elapsed_milliseconds,
+            bytes_received=(bytes_received_h << 32) | bytes_received_l,
+            stream_buffer_size=stream_buffer_size,
+            stream_buffer_fullness=stream_buffer_fullness,
+            output_buffer_size=output_buffer_size,
+            output_buffer_fullness=output_buffer_fullness,
+            server_timestamp=server_timestamp,
+        )
 
-        self._jiffies = jiffies
+    def _store_status(self, status: PlayerStatus, *, position: bool = True) -> None:
+        """
+        Store the player clock and song position reported in a STAT message.
+
+        :param status: The parsed status of the STAT message.
+        :param position: Whether to store the song position too, not just the clock.
+        """
+        self._jiffies = status.jiffies
         self._jiffies_timestamp = time.time()
         if not position:
             return
@@ -1176,8 +1222,8 @@ class SlimClient:
             self._elapsed_milliseconds = 0
             self._elapsed_seconds = 0
         else:
-            self._elapsed_milliseconds = elapsed_milliseconds
-            self._elapsed_seconds = elapsed_seconds
+            self._elapsed_milliseconds = status.elapsed_milliseconds
+            self._elapsed_seconds = status.elapsed_seconds
 
     async def _process_stat_stmu(self, data: bytes) -> None:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
