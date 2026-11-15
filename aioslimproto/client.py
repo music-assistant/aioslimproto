@@ -726,6 +726,40 @@ class SlimClient:
             httpreq=httpreq,
         )
 
+    async def update_metadata(self, metadata: MediaMetadata) -> None:
+        """
+        Replace the metadata of the stream that was requested last.
+
+        That is the stream that is about to play, else the one that plays. For a
+        stream that plays on while what it carries changes, such as a radio station
+        or one stream of several tracks.
+
+        :param metadata: The metadata of what the stream carries from now on.
+        """
+        media = self._buffering_media or self._current_media
+        if media is None or media.metadata == metadata:
+            return
+        media.metadata = metadata
+        self.extra_data["playlist_timestamp"] = int(time.time())
+        self.signal_update()
+        await self._render_display()
+
+    async def clear_media(self) -> None:
+        """
+        Forget the media of the player: it shows and reports none from then on.
+
+        For a stream that is over for the server while the player did not report its
+        end, such as one that is stopped: a stop alone keeps the media that played.
+        """
+        if not (self._current_media or self._buffering_media or self._next_media):
+            return
+        self._current_media = None
+        self._buffering_media = None
+        self._next_media = None
+        self.extra_data["playlist_timestamp"] = int(time.time())
+        self.signal_update()
+        await self._render_display()
+
     async def pause_for(self, millis: int) -> None:
         """Handle pause for x amount of time to help with syncing."""
         # https://wiki.slimdevices.com/index.php/SlimProto_TCP_protocol.html#u.2C_p.2C_a_.26_t_commands_and_replay_gain_field§
@@ -1287,6 +1321,12 @@ class SlimClient:
         headers = parse_headers(data)
 
         if "location" in headers:
+            if (media := self._buffering_media) is None:
+                # the stream this redirect is for was given up while it was set up
+                self.logger.debug(
+                    "Ignoring redirect of a stream that is not wanted anymore."
+                )
+                return
             # handle redirect
             location = headers["location"]
             self.logger.debug("Received redirect to %s", location)
@@ -1294,13 +1334,13 @@ class SlimClient:
             # requested, and during a gapless handoff the current track must play on
             await self.play_url(
                 location,
-                self._buffering_media.mime_type,
-                self._buffering_media.metadata,
-                self._buffering_media.transition,
-                self._buffering_media.transition_duration,
+                media.mime_type,
+                media.metadata,
+                media.transition,
+                media.transition_duration,
                 send_flush=False,
-                stream_threshold=self._buffering_media.stream_threshold,
-                output_threshold=self._buffering_media.output_threshold,
+                stream_threshold=media.stream_threshold,
+                output_threshold=media.output_threshold,
                 autostart=self._auto_play,
             )
             return

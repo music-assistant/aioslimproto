@@ -554,6 +554,162 @@ class TestRedirect:
         assert live_client.elapsed_milliseconds >= 42_000
 
 
+class TestUpdateMetadata:
+    """A stream that plays on can be given the metadata of what it carries now."""
+
+    @pytest.mark.asyncio
+    async def test_replaces_the_metadata_of_the_playing_media(
+        self, live_client: SlimClient
+    ) -> None:
+        """The media that plays reports the new metadata, and the display shows it."""
+        await live_client.play_url(
+            url=_TRACK_URL, metadata={"title": "One", "artist": "First"}
+        )
+        await live_client._process_stat_stms(b"")  # noqa: SLF001
+        live_client.callback.reset_mock()
+        live_client.display_control.set_lines = AsyncMock()
+        live_client.extra_data["playlist_timestamp"] = 0
+
+        await live_client.update_metadata({"title": "Two", "artist": "Second"})
+
+        assert live_client.current_media is not None
+        assert live_client.current_media.url == _TRACK_URL
+        assert live_client.current_media.metadata == {
+            "title": "Two",
+            "artist": "Second",
+        }
+        # clients that follow the playlist are told that it changed
+        assert live_client.extra_data["playlist_timestamp"] > 0
+        live_client.callback.assert_called_once_with(
+            live_client, EventType.PLAYER_UPDATED
+        )
+        live_client.display_control.set_lines.assert_awaited_once_with("Second", "Two")
+
+    @pytest.mark.asyncio
+    async def test_replaces_the_metadata_of_a_stream_that_is_about_to_play(
+        self, live_client: SlimClient
+    ) -> None:
+        """A stream that buffers starts with the metadata it was given last."""
+        await live_client.play_url(url=_TRACK_URL, metadata={"title": "Old"})
+        await live_client._process_stat_stms(b"")  # noqa: SLF001
+        await live_client.play_url(
+            url="http://127.0.0.1:8080/next.wav", metadata={"title": "One"}
+        )
+
+        await live_client.update_metadata({"title": "Two"})
+
+        # the stream that still plays keeps its own
+        assert live_client.current_media is not None
+        assert live_client.current_media.metadata == {"title": "Old"}
+        await live_client._process_stat_stms(b"")  # noqa: SLF001
+        assert live_client.current_media.url == "http://127.0.0.1:8080/next.wav"
+        assert live_client.current_media.metadata == {"title": "Two"}
+
+    @pytest.mark.asyncio
+    async def test_the_same_metadata_is_no_update(
+        self, live_client: SlimClient
+    ) -> None:
+        """Metadata that did not change is not reported again."""
+        await live_client.play_url(url=_TRACK_URL, metadata={"title": "One"})
+        await live_client._process_stat_stms(b"")  # noqa: SLF001
+        live_client.callback.reset_mock()
+        live_client.extra_data["playlist_timestamp"] = 0
+
+        await live_client.update_metadata({"title": "One"})
+
+        live_client.callback.assert_not_called()
+        assert live_client.extra_data["playlist_timestamp"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_player_without_a_stream_takes_no_metadata(
+        self, live_client: SlimClient
+    ) -> None:
+        """Metadata belongs to a stream: without one there is nothing to update."""
+        await live_client.update_metadata({"title": "One"})
+
+        assert live_client.current_media is None
+        updated = call(live_client, EventType.PLAYER_UPDATED)
+        assert updated not in live_client.callback.mock_calls
+
+
+class TestClearMedia:
+    """A stream that is over for the server can be forgotten by the player."""
+
+    @pytest.mark.asyncio
+    async def test_forgets_the_media_a_stop_keeps(
+        self, live_client: SlimClient
+    ) -> None:
+        """After a stop the media that played is still reported, until it is cleared."""
+        await live_client.play_url(
+            url=_TRACK_URL, metadata={"title": "One", "artist": "First"}
+        )
+        await live_client._process_stat_stms(b"")  # noqa: SLF001
+        await live_client.stop()
+        assert live_client.current_media is not None
+        live_client.callback.reset_mock()
+        live_client.display_control.set_lines = AsyncMock()
+        live_client.extra_data["playlist_timestamp"] = 0
+
+        await live_client.clear_media()
+
+        assert live_client.current_media is None
+        assert live_client.current_url is None
+        assert live_client.extra_data["playlist_timestamp"] > 0
+        live_client.callback.assert_called_once_with(
+            live_client, EventType.PLAYER_UPDATED
+        )
+        # an idle display: the clock, not the track
+        (shown,) = live_client.display_control.set_lines.await_args_list
+        assert shown.args == ()
+        assert set(shown.kwargs) == {"fullscreen"}
+
+    @pytest.mark.asyncio
+    async def test_forgets_a_stream_that_did_not_start(
+        self, live_client: SlimClient
+    ) -> None:
+        """A stream that was requested and never played leaves no media either."""
+        await live_client.play_url(url=_TRACK_URL, metadata={"title": "One"})
+        _enqueue_next_media(live_client)
+
+        await live_client.clear_media()
+
+        # a late start of that stream brings nothing back
+        await live_client._process_stat_stms(b"")  # noqa: SLF001
+        assert live_client.current_media is None
+        assert live_client.next_media is None
+
+    @pytest.mark.asyncio
+    async def test_a_late_redirect_of_a_forgotten_stream_starts_nothing(
+        self, live_client: SlimClient
+    ) -> None:
+        """A redirect that arrives after its stream was forgotten is ignored."""
+        await live_client.play_url(url=_TRACK_URL, metadata={"title": "One"})
+        live_client._process_stat_stmc(b"")  # noqa: SLF001
+        await live_client.stop()
+        await live_client.clear_media()
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await live_client._process_resp(  # noqa: SLF001
+            b"HTTP/1.0 302 Found\r\nLocation: http://127.0.0.1:8081/track.wav\r\n\r\n"
+        )
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        assert live_client.current_media is None
+
+    @pytest.mark.asyncio
+    async def test_a_player_without_media_has_nothing_to_forget(
+        self, live_client: SlimClient
+    ) -> None:
+        """Clearing twice reports the change once."""
+        live_client.extra_data["playlist_timestamp"] = 0
+
+        await live_client.clear_media()
+
+        updated = call(live_client, EventType.PLAYER_UPDATED)
+        assert updated not in live_client.callback.mock_calls
+        assert live_client.extra_data["playlist_timestamp"] == 0
+
+
 class TestOutputUnderrun:
     """A player that ran out of audio (STMo) is resumed."""
 
