@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from aioslimproto.client import SlimClient
-from aioslimproto.models import EventType, MediaDetails, PlayerState
+from aioslimproto.models import EventType, MediaDetails, PlayerState, PlayerStatus
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
@@ -1036,3 +1036,224 @@ class TestSqueezePlayVolumeCurve:
         curve = await self._curve(client, device_id)
 
         assert curve == (-50, -1, 1), what
+
+
+# far from any real monotonic reading, so the default clock can't pass for it
+_SERVER_CLOCK = 5_000_000.0
+# every STAT status field distinct; bytes received spans both 32-bit words
+_RAW_STATUS = PlayerStatus(
+    received=_SERVER_CLOCK,
+    jiffies=3_000_000_123,
+    elapsed_seconds=42,
+    elapsed_milliseconds=42_250,
+    bytes_received=5 * 2**32 + 123_456,
+    stream_buffer_size=2_097_152,
+    stream_buffer_fullness=1_048_000,
+    output_buffer_size=3_528_000,
+    output_buffer_fullness=1_764_321,
+    server_timestamp=0xDEADBEEF,
+)
+
+
+def _full_stmt_payload(status: PlayerStatus) -> bytes:
+    """Build an STMt STAT payload that reports every field of status."""
+    return b"STMt" + struct.pack(
+        "!BBBLLLLHLLLLHLL",
+        1,
+        2,
+        3,
+        status.stream_buffer_size,
+        status.stream_buffer_fullness,
+        status.bytes_received >> 32,
+        status.bytes_received & 0xFFFFFFFF,
+        77,
+        status.jiffies,
+        status.output_buffer_size,
+        status.output_buffer_fullness,
+        status.elapsed_seconds,
+        0x1234,
+        status.elapsed_milliseconds,
+        status.server_timestamp,
+    )
+
+
+class TestStatusRequest:
+    """A status request is a strm t whose timestamp the player echoes back."""
+
+    @pytest.mark.asyncio
+    async def test_request_status_sends_the_timestamp(
+        self, live_client: SlimClient
+    ) -> None:
+        """The timestamp goes out in the replay gain field of the strm t."""
+        await live_client.request_status(0xDEADBEEF)
+
+        live_client._send_strm.assert_awaited_once_with(  # noqa: SLF001
+            b"t", autostart=b"0", flags=0, replay_gain=0xDEADBEEF
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_requests_the_status_with_its_id(
+        self, live_client: SlimClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The periodic heartbeat is a status request stamped with its own id."""
+        monkeypatch.setattr("aioslimproto.client.HEARTBEAT_INTERVAL", 0)
+        live_client._connected = True  # noqa: SLF001
+        live_client._last_heartbeat = 6  # noqa: SLF001
+        live_client.display_control.disabled = True
+        # one heartbeat, then the player is gone
+        live_client._send_strm.side_effect = lambda *_args, **_kwargs: setattr(  # noqa: SLF001
+            live_client, "_connected", False
+        )
+
+        await asyncio.wait_for(live_client._send_heartbeat(), 1)  # noqa: SLF001
+
+        live_client._send_strm.assert_awaited_once_with(  # noqa: SLF001
+            b"t", autostart=b"0", flags=0, replay_gain=7
+        )
+
+
+class TestHeartbeatStatus:
+    """The heartbeat event carries the status exactly as the player reported it."""
+
+    @pytest.mark.asyncio
+    async def test_status_read_from_the_socket(self, writer: Mock) -> None:
+        """Every STAT field arrives unchanged, stamped on the server clock."""
+        reader = asyncio.StreamReader()
+        handled = asyncio.Event()
+        callback = Mock(side_effect=lambda *_args: handled.set())
+        slim_client = SlimClient(reader, writer, callback, clock=lambda: _SERVER_CLOCK)
+
+        reader.feed_data(_frame(b"STAT", _full_stmt_payload(_RAW_STATUS)))
+        try:
+            await asyncio.wait_for(handled.wait(), 1)
+        finally:
+            slim_client._reader_task.cancel()  # noqa: SLF001
+
+        callback.assert_any_call(slim_client, EventType.PLAYER_HEARTBEAT, _RAW_STATUS)
+
+    @pytest.mark.asyncio
+    async def test_status_is_raw_while_awaiting_the_stream_start(
+        self, live_client: SlimClient
+    ) -> None:
+        """A flushed stream's position is reported, but not taken as the position."""
+        await live_client.play_url(url=_TRACK_URL, autostart=False, send_flush=True)
+
+        await live_client._process_stat(  # noqa: SLF001
+            _full_stmt_payload(_RAW_STATUS), received=_SERVER_CLOCK
+        )
+
+        live_client.callback.assert_any_call(
+            live_client, EventType.PLAYER_HEARTBEAT, _RAW_STATUS
+        )
+        assert live_client._elapsed_milliseconds == 0  # noqa: SLF001
+        assert live_client._elapsed_seconds == 0  # noqa: SLF001
+        assert live_client._jiffies == _RAW_STATUS.jiffies  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_status_is_raw_while_paused(self, live_client: SlimClient) -> None:
+        """A paused player's position is reported, but the paused one is kept."""
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        live_client._elapsed_milliseconds = 10_350  # noqa: SLF001
+        live_client._elapsed_seconds = 10  # noqa: SLF001
+
+        await live_client._process_stat(  # noqa: SLF001
+            _full_stmt_payload(_RAW_STATUS), received=_SERVER_CLOCK
+        )
+
+        live_client.callback.assert_any_call(
+            live_client, EventType.PLAYER_HEARTBEAT, _RAW_STATUS
+        )
+        assert live_client._elapsed_milliseconds == 10_350  # noqa: SLF001
+        assert live_client._elapsed_seconds == 10  # noqa: SLF001
+        assert live_client._jiffies == _RAW_STATUS.jiffies  # noqa: SLF001
+
+
+class TestServerClock:
+    """Every server time of a client is on the clock it was given."""
+
+    @staticmethod
+    def _client(writer: Mock, now: list[float]) -> SlimClient:
+        """Create a client on a clock that reads now[0]."""
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        slim_client = SlimClient(reader, writer, Mock(), clock=lambda: now[0])
+        slim_client.packet_latency = 0.0
+        return slim_client
+
+    @pytest.mark.asyncio
+    async def test_server_time_follows_the_injected_clock(self, writer: Mock) -> None:
+        """server_time() reads the injected clock."""
+        now = [_SERVER_CLOCK]
+        slim_client = self._client(writer, now)
+
+        assert slim_client.server_time() == _SERVER_CLOCK
+        now[0] += 1.5
+        assert slim_client.server_time() == _SERVER_CLOCK + 1.5
+
+    @pytest.mark.asyncio
+    async def test_server_time_defaults_to_the_monotonic_clock(
+        self, writer: Mock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a clock, server time is time.monotonic()."""
+        monkeypatch.setattr(
+            "aioslimproto.client.time",
+            SimpleNamespace(time=lambda: 1.0, monotonic=lambda: 123.25),
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+
+        assert SlimClient(reader, writer, Mock()).server_time() == 123.25
+
+    @pytest.mark.asyncio
+    async def test_socket_read_maps_the_player_clock_onto_the_injected_clock(
+        self, writer: Mock
+    ) -> None:
+        """A heartbeat read from the socket sets the epoch on the injected clock."""
+        reader = asyncio.StreamReader()
+        handled = asyncio.Event()
+        slim_client = SlimClient(
+            reader,
+            writer,
+            Mock(side_effect=lambda *_args: handled.set()),
+            clock=lambda: _SERVER_CLOCK,
+        )
+
+        reader.feed_data(_frame(b"STAT", _stmt_payload(40_000)))
+        try:
+            await asyncio.wait_for(handled.wait(), 1)
+        finally:
+            slim_client._reader_task.cancel()  # noqa: SLF001
+
+        assert slim_client.jiffies_epoch == _SERVER_CLOCK - 40
+
+    @pytest.mark.asyncio
+    async def test_song_position_extrapolates_on_the_injected_clock(
+        self, writer: Mock
+    ) -> None:
+        """A playing player's song position counts on in injected-clock time."""
+        now = [_SERVER_CLOCK]
+        slim_client = self._client(writer, now)
+        slim_client._state = PlayerState.PLAYING  # noqa: SLF001
+        slim_client._jiffies_epoch = _SERVER_CLOCK - 10  # noqa: SLF001
+        slim_client._jiffies = 10_000  # noqa: SLF001
+        slim_client._elapsed_milliseconds = 42_000  # noqa: SLF001
+        now[0] += 0.25
+
+        assert slim_client.song_elapsed_seconds == pytest.approx(42.25)
+
+
+class TestHeadlessSqueezeEsp32:
+    """SqueezeESP32 reports device id 101 when it has no display."""
+
+    @pytest.mark.asyncio
+    async def test_device_id_101_is_a_squeezeesp32(self, client: SlimClient) -> None:
+        """A headless SqueezeESP32 gets its device type and sync deadband."""
+        client.send_frame = AsyncMock()
+
+        await client._process_helo(  # noqa: SLF001
+            bytes([101, 0]) + b"\xaa\xbb\xcc\xdd\xee\xff" + bytes(28)
+        )
+        client.disconnect()
+
+        assert client.device_type == "squeezeesp32"
+        assert client.min_sync_adjust == 10

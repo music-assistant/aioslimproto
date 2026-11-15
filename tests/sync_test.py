@@ -37,10 +37,12 @@ def writer() -> Mock:
 def make_client(writer: Mock) -> MakeClient:
     """Return a factory for SlimClients with a stubbed strm sender."""
 
-    def _factory(player_id: str = "p1") -> SlimClient:
+    def _factory(
+        player_id: str = "p1", clock: Callable[[], float] | None = None
+    ) -> SlimClient:
         reader = asyncio.StreamReader()
         reader.feed_eof()
-        client = SlimClient(reader, writer, Mock())
+        client = SlimClient(reader, writer, Mock(), clock)
         client._send_strm = AsyncMock()  # noqa: SLF001
         client._player_id = player_id  # noqa: SLF001
         client.packet_latency = 0.0
@@ -55,7 +57,6 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     clock = SimpleNamespace(wall=9_000.0, mono=9_000.0)
     fake_time = SimpleNamespace(time=lambda: clock.wall, monotonic=lambda: clock.mono)
     monkeypatch.setattr("aioslimproto.client.time", fake_time)
-    monkeypatch.setattr("aioslimproto.sync.time", fake_time)
     return clock
 
 
@@ -143,8 +144,12 @@ class TestSyncClock:
     """Sync timing runs on the monotonic clock, timed at the socket read."""
 
     @pytest.fixture
-    async def live_client(self, writer: Mock) -> AsyncIterator[SlimClient]:
-        """Create a SlimClient that reads its packets from a live socket reader."""
+    async def live_client(
+        self,
+        writer: Mock,
+        clock: SimpleNamespace,  # noqa: ARG002
+    ) -> AsyncIterator[SlimClient]:
+        """Create a SlimClient on the faked clock that reads from a live socket."""
         client = SlimClient(asyncio.StreamReader(), writer, Mock())
         client.packet_latency = 0.0
         yield client
@@ -255,6 +260,61 @@ class TestSyncClock:
         await group.check([first, second])
 
         second._send_strm.assert_any_call(b"a", replay_gain=250)  # noqa: SLF001
+
+
+class TestInjectedServerClock:
+    """Without a time override, a group takes server time from its clients' clock."""
+
+    NOW = 5_000_000.0
+
+    async def test_group_starts_on_the_clients_clock(
+        self, make_client: MakeClient
+    ) -> None:
+        """The common start instant is taken on the clients' clock."""
+        clients = [make_client(player_id, clock=lambda: self.NOW) for player_id in "ab"]
+        for client in clients:
+            client._jiffies_epoch = self.NOW - 1000  # noqa: SLF001
+
+        await SyncGroup().start(clients)
+
+        for client in clients:
+            client._send_strm.assert_called_once_with(b"u", replay_gain=1_000_200)  # noqa: SLF001
+
+    async def test_group_checks_on_the_clients_clock(
+        self, make_client: MakeClient
+    ) -> None:
+        """Play points are aged on the clients' clock."""
+        now = [self.NOW]
+        first, second = (
+            make_client(player_id, clock=lambda: now[0]) for player_id in "ab"
+        )
+        for client, apparent in ((first, self.NOW - 1000), (second, self.NOW - 999.75)):
+            client.min_sync_adjust = 10
+            client._state = PlayerState.PLAYING  # noqa: SLF001
+            _set_play_point(client, self.NOW - 0.2, apparent)
+        group = SyncGroup()
+
+        await group.check([first, second])
+        now[0] += CHECK_SYNC_INTERVAL
+        for client in (first, second):
+            _shift_reading(client, round(CHECK_SYNC_INTERVAL * 1000))
+        await group.check([first, second])
+
+        second._send_strm.assert_any_call(b"a", replay_gain=250)  # noqa: SLF001
+
+    async def test_resume_without_clients(self) -> None:
+        """Resuming an empty group needs no server time."""
+        await SyncGroup().resume([], 42.0)
+
+    async def test_resume_single_player_without_time(
+        self, make_client: MakeClient
+    ) -> None:
+        """A single player resumes plainly without a time override."""
+        only = make_client("a")
+
+        await SyncGroup().resume([only], 42.0)
+
+        only._send_strm.assert_called_once_with(b"u", replay_gain=0)  # noqa: SLF001
 
 
 class TestPlayPoint:

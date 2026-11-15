@@ -12,7 +12,6 @@ The per-player clock mapping and play points live on :class:`SlimClient`.
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING
 
 from .const import (
@@ -40,8 +39,9 @@ class SyncGroup:
     Holds sync state for one group of players.
 
     Mirrors the synchronisation duties of LMS' StreamingController, without the
-    transport/state-machine parts. All server times are ``time.monotonic()``
-    seconds, the clock :class:`SlimClient` maps the player clocks onto.
+    transport/state-machine parts. All server times are seconds on the server clock
+    (``time.monotonic()`` unless the server was given another clock), the clock
+    :class:`SlimClient` maps the player clocks onto.
     """
 
     def __init__(self) -> None:
@@ -74,7 +74,7 @@ class SyncGroup:
         clients = list(clients)
         if len(clients) < 2:
             return
-        now = now if now is not None else time.monotonic()
+        now = now if now is not None else clients[0].server_time()
 
         player_start_delay = 0
         for client in clients:
@@ -124,13 +124,12 @@ class SyncGroup:
         :param now: Optional server time override (for testing).
         """
         clients = list(clients)
-        now = now if now is not None else time.monotonic()
-
         if len(clients) < 2:
             for client in clients:
                 await client.unpause_at(0)
             return
 
+        now = now if now is not None else clients[0].server_time()
         start_at_base = now + SYNC_START_DELAY / 1000
         self.next_check = start_at_base + SYNC_RESUME_HOLDOFF
         self._settled_after = start_at_base + SYNC_PLAYPOINT_SETTLE
@@ -168,7 +167,7 @@ class SyncGroup:
         if any(client.state != PlayerState.PLAYING for client in clients):
             return
 
-        now = now if now is not None else time.monotonic()
+        now = now if now is not None else clients[0].server_time()
         if now < self.next_check:
             return
         self.next_check = now + CHECK_SYNC_INTERVAL
