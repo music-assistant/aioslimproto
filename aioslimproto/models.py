@@ -39,7 +39,7 @@ class SlimEvent:
 @dataclass(frozen=True, slots=True)
 class PlayerStatus:
     """
-    Status of a player, exactly as it reported it in a STAT message.
+    The timing and buffer fields of a STAT message, as the player reported them.
 
     :param received: Server time (seconds, on the server clock) at which the
         message was read from the socket.

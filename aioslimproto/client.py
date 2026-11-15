@@ -750,6 +750,8 @@ class SlimClient:
 
         :param timestamp: Unsigned 32-bit value the player echoes back in
             :attr:`PlayerStatus.server_timestamp`, to match a reply to its request.
+            A status the player sends unasked carries 0 and the periodic heartbeat
+            counts up from 1, so use values apart from those to recognise a reply.
         """
         # https://wiki.slimdevices.com/index.php/SlimProto_TCP_protocol.html#u.2C_p.2C_a_.26_t_commands_and_replay_gain_field
         await self._send_strm(b"t", autostart=b"0", flags=0, replay_gain=timestamp)
