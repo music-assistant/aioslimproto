@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from aioslimproto.client import SlimClient
-from aioslimproto.models import EventType, MediaDetails, PlayerState, PlayerStatus
+from aioslimproto.models import (
+    ButtonCode,
+    EventType,
+    MediaDetails,
+    PlayerState,
+    PlayerStatus,
+    RemoteCode,
+)
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
@@ -243,6 +250,102 @@ class TestGaplessHandoffState:
         live_client._process_stat_stmc(b"")  # noqa: SLF001
 
         assert live_client.state == PlayerState.BUFFERING
+
+
+def _press(client: SlimClient, kind: str, key: str, timestamp: int = 1000) -> None:
+    """Let the player report a press of play or pause, on a button or the remote."""
+    if kind == "butn":
+        client._process_butn(struct.pack("!LL", timestamp, ButtonCode[key]))  # noqa: SLF001
+    else:
+        client._process_ir(struct.pack("!LxxL", timestamp, RemoteCode[key]))  # noqa: SLF001
+
+
+def _button_events(client: SlimClient) -> list[dict[str, int | str]]:
+    """Return the button events the host was given."""
+    callback: Mock = client.callback  # type: ignore[assignment]
+    return [
+        event_call.args[2]
+        for event_call in callback.call_args_list
+        if event_call.args[1] == EventType.PLAYER_BTN_EVENT
+    ]
+
+
+@pytest.mark.parametrize("kind", ["butn", "ir"])
+class TestTransportKeys:
+    """The player acts on play and pause itself where it can, the host gets the rest."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("state", "key", "command", "after"),
+        [
+            (PlayerState.PLAYING, "PAUSE", call(b"p"), PlayerState.PAUSED),
+            (PlayerState.PAUSED, "PAUSE", call(b"u", flags=0), PlayerState.PLAYING),
+            (PlayerState.PAUSED, "PLAY", call(b"u", flags=0), PlayerState.PLAYING),
+        ],
+    )
+    async def test_a_key_the_player_can_follow_stays_with_the_player(
+        self,
+        live_client: SlimClient,
+        kind: str,
+        state: PlayerState,
+        key: str,
+        command: object,
+        after: PlayerState,
+    ) -> None:
+        """Pause on a playing player and either key on a paused one need no host."""
+        live_client._state = state  # noqa: SLF001
+
+        _press(live_client, kind, key)
+        await asyncio.sleep(0)
+
+        assert live_client._send_strm.call_args_list == [command]  # noqa: SLF001
+        assert live_client.state == after
+        assert _button_events(live_client) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("state", "key"),
+        [
+            (PlayerState.STOPPED, "PLAY"),
+            (PlayerState.STOPPED, "PAUSE"),
+            (PlayerState.BUFFERING, "PLAY"),
+            (PlayerState.BUFFERING, "PAUSE"),
+            (PlayerState.BUFFER_READY, "PLAY"),
+            (PlayerState.BUFFER_READY, "PAUSE"),
+            (PlayerState.PLAYING, "PLAY"),
+        ],
+    )
+    async def test_a_key_the_player_can_not_follow_goes_to_the_host(
+        self, live_client: SlimClient, kind: str, state: PlayerState, key: str
+    ) -> None:
+        """A stopped player has nothing to resume: the host decides what plays."""
+        live_client._state = state  # noqa: SLF001
+
+        _press(live_client, kind, key)
+        await asyncio.sleep(0)
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        assert live_client.state == state
+        if kind == "butn":
+            expected = {"type": "butn", "timestamp": 1000, "button": ButtonCode[key]}
+        else:
+            expected = {"type": "ir", "timestamp": 1000, "code": RemoteCode[key]}
+        assert _button_events(live_client) == [expected]
+
+    @pytest.mark.asyncio
+    async def test_a_pause_is_not_turned_into_a_resume_by_a_pause_before_it(
+        self, live_client: SlimClient, kind: str
+    ) -> None:
+        """A press is decided on the state it was made in, not what its task finds."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+
+        _press(live_client, kind, "PAUSE")
+        # a pause of the host lands before the task of the press runs
+        live_client._state = PlayerState.PAUSED  # noqa: SLF001
+        await asyncio.sleep(0)
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        assert live_client.state == PlayerState.PAUSED
 
 
 class TestEnqueueNeverFlushes:

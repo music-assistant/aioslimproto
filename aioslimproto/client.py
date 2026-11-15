@@ -994,11 +994,9 @@ class SlimClient:
         if button == ButtonCode.POWER:
             asyncio.create_task(self.toggle_power())
             return
-        if button == ButtonCode.PAUSE:
-            asyncio.create_task(self.toggle_pause())
-            return
-        if button == ButtonCode.PLAY:
-            asyncio.create_task(self.play())
+        if button in (ButtonCode.PLAY, ButtonCode.PAUSE) and self._handle_transport_key(
+            play=button == ButtonCode.PLAY
+        ):
             return
         if button == ButtonCode.VOLUME_DOWN:
             asyncio.create_task(self.volume_down())
@@ -1047,11 +1045,9 @@ class SlimClient:
         if code == RemoteCode.POWER:
             asyncio.create_task(self.toggle_power())
             return
-        if code == RemoteCode.PAUSE:
-            asyncio.create_task(self.toggle_pause())
-            return
-        if code == RemoteCode.PLAY:
-            asyncio.create_task(self.play())
+        if code in (RemoteCode.PLAY, RemoteCode.PAUSE) and self._handle_transport_key(
+            play=code == RemoteCode.PLAY
+        ):
             return
         if code == RemoteCode.VOLUME_DOWN:
             asyncio.create_task(self.volume_down())
@@ -1069,6 +1065,24 @@ class SlimClient:
                 "code": code,
             },
         )
+
+    def _handle_transport_key(self, *, play: bool) -> bool:
+        """
+        Pause or resume the player for a play or pause key it can act on itself.
+
+        Pause pauses a playing player, and play or pause resumes a paused one.
+
+        :param play: Whether the key is play, else pause.
+        :return: Whether the key was handled, else the host gets it as a button event.
+        """
+        # decided on the state at the press: the task may run after it changed
+        if self._state == PlayerState.PAUSED:
+            asyncio.create_task(self.play())
+        elif self._state == PlayerState.PLAYING and not play:
+            asyncio.create_task(self.pause())
+        else:
+            return False
+        return True
 
     def _process_dsco(self, data: bytes) -> None:
         """Process incoming stat DSCO message (data stream disconnected)."""
