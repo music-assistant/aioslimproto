@@ -1,8 +1,10 @@
 """Tests for SlimClient's stream start and next-media promotion."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import struct
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
@@ -855,6 +857,138 @@ class TestOutputUnderrun:
         live_client._send_strm.assert_not_called()  # noqa: SLF001
         underrun = call(live_client, EventType.PLAYER_OUTPUT_UNDERRUN)
         assert underrun not in live_client.callback.mock_calls
+
+
+class TestStopAfterUnderrun:
+    """A player the host stops after an underrun stays stopped."""
+
+    @staticmethod
+    def _react_to_underrun(
+        client: SlimClient, reaction: Callable[[], Awaitable[None]]
+    ) -> list[asyncio.Task[None]]:
+        """Run the reaction as a task on each underrun, as an event subscriber does."""
+        tasks: list[asyncio.Task[None]] = []
+
+        def callback(_client: SlimClient, event: EventType, _data: Any = None) -> None:
+            if event == EventType.PLAYER_OUTPUT_UNDERRUN:
+                tasks.append(asyncio.create_task(reaction()))
+
+        client.callback = Mock(side_effect=callback)
+        return tasks
+
+    @pytest.mark.asyncio
+    async def test_the_resume_confirmation_does_not_restart_a_stopped_player(
+        self, live_client: SlimClient
+    ) -> None:
+        """The answer to the unpause that went out before the stop changes nothing."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        tasks = self._react_to_underrun(live_client, live_client.stop)
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+        await asyncio.gather(*tasks)
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+
+        assert live_client._send_strm.await_args_list == [  # noqa: SLF001
+            call(b"u", replay_gain=0),
+            call(b"q", flags=0),
+        ]
+        assert live_client.state == PlayerState.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_an_underrun_of_a_stopped_player_does_not_unpause_it(
+        self, live_client: SlimClient
+    ) -> None:
+        """An underrun reported after the stop is passed on but not resumed."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        await live_client.stop()
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        underrun = call(live_client, EventType.PLAYER_OUTPUT_UNDERRUN)
+        assert underrun in live_client.callback.mock_calls
+        assert live_client.state == PlayerState.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_powering_off_after_an_underrun_keeps_the_player_stopped(
+        self, live_client: SlimClient
+    ) -> None:
+        """A power off in reaction to the underrun stops the player for good."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        tasks = self._react_to_underrun(
+            live_client, lambda: live_client.power(powered=False)
+        )
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+        await asyncio.gather(*tasks)
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+
+        assert not live_client.powered
+        assert live_client.state == PlayerState.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_a_new_stream_requested_after_an_underrun_starts_normally(
+        self, live_client: SlimClient
+    ) -> None:
+        """Underruns of the flushed stream are not resumed; the new stream plays."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+        tasks = self._react_to_underrun(
+            live_client, lambda: live_client.play_url(url=_TRACK_URL)
+        )
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+        await asyncio.gather(*tasks)
+        live_client._send_strm.reset_mock()  # noqa: SLF001
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+        await live_client._process_stat(b"STMs" + bytes(47), received=0.0)  # noqa: SLF001
+
+        live_client._send_strm.assert_not_called()  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.current_url == _TRACK_URL
+
+    @pytest.mark.asyncio
+    async def test_an_underrun_the_host_ignores_is_resumed(
+        self, live_client: SlimClient
+    ) -> None:
+        """Without a reaction from the host, the player is unpaused and plays on."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+
+        await live_client._process_stat(b"STMo" + bytes(47), received=0.0)  # noqa: SLF001
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+
+        live_client._send_strm.assert_awaited_once_with(b"u", replay_gain=0)  # noqa: SLF001
+        assert live_client.state == PlayerState.PLAYING
+
+    @pytest.mark.asyncio
+    async def test_a_paused_player_is_resumed_by_play(
+        self, live_client: SlimClient
+    ) -> None:
+        """A normal pause and unpause end in the playing state."""
+        live_client._state = PlayerState.PLAYING  # noqa: SLF001
+
+        await live_client.pause()
+        await live_client._process_stat(_stmp_payload(200_000, 10_000), received=0.0)  # noqa: SLF001
+        assert live_client.state == PlayerState.PAUSED
+        await live_client.play()
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+
+        assert live_client.state == PlayerState.PLAYING
+
+    @pytest.mark.asyncio
+    async def test_a_stream_started_at_buffer_ready_is_playing(
+        self, live_client: SlimClient
+    ) -> None:
+        """The resume of a stream that waited for its buffer marks it playing."""
+        await live_client.play_url(url=_TRACK_URL, autostart=False)
+        live_client._process_stat_stml(b"")  # noqa: SLF001
+        assert live_client.state == PlayerState.BUFFER_READY
+
+        await live_client.unpause_at(0)
+        await live_client._process_stat(b"STMr" + bytes(47), received=0.0)  # noqa: SLF001
+
+        assert live_client.state == PlayerState.PLAYING
 
 
 def _stmt_payload(jiffies: int, elapsed_ms: int = 0) -> bytes:

@@ -1158,6 +1158,8 @@ class SlimClient:
         if self._awaiting_stream_start:
             return  # late report of the flushed stream
         self.callback(self, EventType.PLAYER_OUTPUT_UNDERRUN)
+        if self._state == PlayerState.STOPPED:
+            return  # a stopped player stays stopped
         # SqueezePlay players (e.g. Squeezebox Radio) pause on an underrun until the
         # server resumes them; squeezelite plays on by itself and just confirms (STMr)
         await self.unpause_at(0)
@@ -1180,6 +1182,8 @@ class SlimClient:
     async def _process_stat_stmr(self, data: bytes) -> None:
         """Process incoming stat STMr message: Resume confirmed."""
         self.logger.debug("STMr received - resume confirmed.")
+        if self._state == PlayerState.STOPPED:
+            return  # a late answer to an unpause sent before the stop
         if self._state == PlayerState.PAUSED:
             # resumed by the player itself, so the position counts on from now
             self._last_timestamp = time.time()
