@@ -1194,8 +1194,6 @@ class SlimClient:
     async def _process_stat_stms(self, data: bytes) -> None:
         """Process incoming stat STMs message: Playback of new track has started."""
         self.logger.debug("STMs received - playback of new track has started")
-        if self._state == PlayerState.STOPPED:
-            return  # a stream that was stopped before it reported its start
         self._state = PlayerState.PLAYING
         # a new track just started at position 0; reset the elapsed baseline and
         # resume honouring STMt heartbeats (they now report the new stream)
