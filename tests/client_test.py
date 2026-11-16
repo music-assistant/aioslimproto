@@ -949,6 +949,19 @@ class TestStopAfterUnderrun:
         assert live_client.current_url == _TRACK_URL
 
     @pytest.mark.asyncio
+    async def test_a_stream_that_starts_after_the_stop_does_not_restart_the_player(
+        self, live_client: SlimClient
+    ) -> None:
+        """A stream that reports its start after it was stopped changes nothing."""
+        await live_client.play_url(url=_TRACK_URL)
+        await live_client.stop()
+
+        await live_client._process_stat(b"STMs" + bytes(47), received=0.0)  # noqa: SLF001
+
+        assert live_client.state == PlayerState.STOPPED
+        assert live_client.current_url is None
+
+    @pytest.mark.asyncio
     async def test_an_underrun_the_host_ignores_is_resumed(
         self, live_client: SlimClient
     ) -> None:
