@@ -248,6 +248,9 @@ class SlimClient:
         """Return name of the player."""
         if self._device_name:
             return self._device_name
+        # like LMS (_makeDefaultName), a player without a name is called by its model
+        if model_name := self._capabilities.get("ModelName"):
+            return model_name
         return f"{self.device_type}: {self.player_id}"
 
     @property

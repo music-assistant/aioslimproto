@@ -1160,6 +1160,24 @@ class TestSetdPlayerName:
             client, EventType.PLAYER_NAME_RECEIVED, expected
         )
 
+    @pytest.mark.parametrize(
+        ("capabilities", "expected"),
+        [
+            ({"Model": "baby", "ModelName": "Squeezebox Radio"}, "Squeezebox Radio"),
+            # no model name to go by: type and id, as before
+            ({"Model": "squeezelite"}, "squeezelite: aa:bb:cc:dd:ee:ff"),
+        ],
+    )
+    def test_name_without_setd_is_the_model(
+        self, client: SlimClient, capabilities: dict, expected: str
+    ) -> None:
+        """Without a reported name the player is called by its model, like LMS."""
+        client._capabilities = capabilities  # noqa: SLF001
+        client._device_type = "squeezelite"  # noqa: SLF001
+        client._player_id = "aa:bb:cc:dd:ee:ff"  # noqa: SLF001
+
+        assert client.name == expected
+
 
 class TestSocketReader:
     """The socket reader handles every complete packet it has buffered."""
