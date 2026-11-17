@@ -818,6 +818,7 @@ class TestSingleValueQueries:
         [
             (["info", "total", "genres", "?"], 12, {"_genres": 12}),
             (["playlist", "title", 3, "?"], "Intro", {"_title": "Intro"}),
+            (["can", "login", "?"], 1, {"_can": 1}),
         ],
     )
     async def test_application_handler_value(

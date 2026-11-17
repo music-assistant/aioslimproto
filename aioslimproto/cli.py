@@ -856,8 +856,9 @@ class SlimProtoCLI:
             return cmd_result
         # Preserve the behaviour of legacy built-in handlers during the transition.
         # Like LMS, a single value is named after the last word before the "?",
-        # skipping an index as in `playlist title 3 ?`, else after the command.
-        query = args[: args.index("?")] if "?" in args else []
+        # skipping an index as in `playlist title 3 ?`, else after the command,
+        # as is `can <command> ?`.
+        query = args[: args.index("?")] if "?" in args and command != "can" else []
         key = next((arg for arg in reversed(query) if isinstance(arg, str)), command)
         return {f"_{key}": cmd_result}
 
