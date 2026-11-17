@@ -855,8 +855,11 @@ class SlimProtoCLI:
         if isinstance(cmd_result, (dict, list)):
             return cmd_result
         # Preserve the behaviour of legacy built-in handlers during the transition.
-        # individual values are returned with underscore ?!
-        return {f"_{command}": cmd_result}
+        # Like LMS, a single value is named after the last word before the "?",
+        # skipping an index as in `playlist title 3 ?`, else after the command.
+        query = args[: args.index("?")] if "?" in args else []
+        key = next((arg for arg in reversed(query) if isinstance(arg, str)), command)
+        return {f"_{key}": cmd_result}
 
     def _display_name(self, player: SlimClient) -> str:
         """Return the name to report for a player, preferring display_name_lookup."""
@@ -1084,7 +1087,7 @@ class SlimProtoCLI:
         subcommand: str,
         *args,
         **kwargs,
-    ) -> int | None:
+    ) -> str | None:
         """Handle player mixer command."""
         arg = args[0] if args else None
         player = self.server.get_player(player_id)
@@ -1095,7 +1098,7 @@ class SlimProtoCLI:
             await player.volume_set(arg)
             return None
         if subcommand == "volume" and arg == "?":
-            return player.volume_level
+            return str(player.volume_level)
         if subcommand == "volume" and isinstance(arg, str) and "+" in arg:
             volume_level = min(100, player.volume_level + int(arg.split("+")[1]))
             await player.volume_set(volume_level)
@@ -1113,7 +1116,7 @@ class SlimProtoCLI:
             await player.mute(not player.muted)
             return None
         if subcommand == "muting" and arg == "?":
-            return int(player.muted)
+            return str(int(player.muted))
         raise NotImplementedError(f"No handler for mixer/{subcommand}")
 
     def _handle_time(self, player_id: str, number: str | int) -> int | None:

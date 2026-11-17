@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import quote
 
@@ -721,6 +721,114 @@ class TestCommandHandler:
         )
 
         assert response == encode_response("a5:41:d2:cd:cd:05", "mixer", "volume", "50")
+
+
+async def send_jsonrpc_request(cli: SlimProtoCLI, request: list) -> dict:
+    """Send one slim.request to the JSON-RPC endpoint and return the decoded answer."""
+    message = {"id": 1, "method": "slim.request", "params": request}
+    response = await cli._handle_jsonrpc_client(  # noqa: SLF001
+        Mock(json=AsyncMock(return_value=message))
+    )
+    return json.loads(response.text)
+
+
+class TestSingleValueQueries:
+    """Tests for the key and value of a query answered with one value.
+
+    Reference: Slim/Control/Queries.pm in LMS, which names the value after the word
+    before the "?".
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_", "expected"),
+        [
+            (["mixer", "volume", "?"], {"_volume": "50"}),
+            (["mixer", "muting", "?"], {"_muting": "0"}),
+            (["time", "?"], {"_time": 0}),
+            (["power", "?"], {"_power": 1}),
+        ],
+    )
+    async def test_builtin_query_over_jsonrpc(
+        self, dummy_server: SlimServer, request_: list, expected: dict
+    ) -> None:
+        """Should answer under the key and with the value type LMS uses."""
+        cli = SlimProtoCLI(dummy_server)
+
+        answer = await send_jsonrpc_request(cli, ["a5:41:d2:cd:cd:05", request_])
+
+        assert answer["result"] == expected
+
+    @pytest.mark.asyncio
+    async def test_wiim_queries_after_a_volume_change(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should answer the two queries a WiiM sends after each volume frame."""
+        dummy_player.volume_level = 31
+        cli = SlimProtoCLI(dummy_server)
+
+        muting = await send_jsonrpc_request(
+            cli, ["a5:41:d2:cd:cd:05", ["mixer", "muting", "?"]]
+        )
+        volume = await send_jsonrpc_request(
+            cli, ["a5:41:d2:cd:cd:05", ["mixer", "volume", "?"]]
+        )
+
+        assert muting == {
+            "id": 1,
+            "method": "slim.request",
+            "params": ["a5:41:d2:cd:cd:05", ["mixer", "muting", "?"]],
+            "result": {"_muting": "0"},
+        }
+        assert volume == {
+            "id": 1,
+            "method": "slim.request",
+            "params": ["a5:41:d2:cd:cd:05", ["mixer", "volume", "?"]],
+            "result": {"_volume": "31"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_builtin_query_over_cometd(self, dummy_server: SlimServer) -> None:
+        """Should answer a CometD request under the key LMS uses."""
+        cli = SlimProtoCLI(dummy_server)
+        client = CometDClient(client_id="c1")
+
+        cli._handle_cometd_client_request(  # noqa: SLF001
+            client,
+            {
+                "id": "7",
+                "data": {
+                    "request": ["a5:41:d2:cd:cd:05", ["mixer", "volume", "?"]],
+                    "response": "/c1/slim/request",
+                },
+            },
+        )
+        answer = await asyncio.wait_for(client.queue.get(), timeout=1)
+
+        assert answer == {
+            "channel": "/c1/slim/request",
+            "id": "7",
+            "data": {"_volume": "50"},
+            "ext": {"priority": None},
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_", "value", "expected"),
+        [
+            (["info", "total", "genres", "?"], 12, {"_genres": 12}),
+            (["playlist", "title", 3, "?"], "Intro", {"_title": "Intro"}),
+        ],
+    )
+    async def test_application_handler_value(
+        self, dummy_server: SlimServer, request_: list, value: Any, expected: dict
+    ) -> None:
+        """Should name a single value from the application handler like LMS does."""
+        cli = SlimProtoCLI(dummy_server, command_handler=AsyncMock(return_value=value))
+
+        answer = await send_jsonrpc_request(cli, ["a5:41:d2:cd:cd:05", request_])
+
+        assert answer["result"] == expected
 
 
 class TestCometDLongPollWait:
