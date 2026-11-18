@@ -2,13 +2,15 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import logging
 import struct
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
+from aioslimproto.cli import SlimProtoCLI
 from aioslimproto.client import SlimClient
 from aioslimproto.models import (
     ButtonCode,
@@ -18,6 +20,7 @@ from aioslimproto.models import (
     PlayerStatus,
     RemoteCode,
 )
+from aioslimproto.server import SlimServer
 
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
@@ -601,6 +604,70 @@ class TestStaleRespIsIgnored:
             call(b"codc", b"p1321"),
             call(b"cont", _CONT_PAYLOAD),
         ]
+
+
+class TestStaleEndOfPlaybackIsIgnored:
+    """The end of a stream the player already dropped must not end the new stream."""
+
+    @staticmethod
+    async def _report(client: SlimClient, *events: bytes) -> None:
+        """Let the player report the given STAT events, in order."""
+        for event in events:
+            await client._process_stat(event + bytes(47), received=0.0)  # noqa: SLF001
+
+    @classmethod
+    async def _play_first_track(cls, client: SlimClient) -> None:
+        """Start a first track the way the player reports it."""
+        await client.play_url(
+            url="http://127.0.0.1:8080/one.wav", metadata={"title": "One"}
+        )
+        await cls._report(client, b"STMc", b"STMs")
+
+    @staticmethod
+    async def _listed_tracks(client: SlimClient) -> list[str]:
+        """Return the tracks the menu-mode CLI status of the player lists."""
+        server = SimpleNamespace(
+            name="testserver",
+            logger=logging.getLogger(),
+            get_player=lambda _player_id: client,
+        )
+        cli = SlimProtoCLI(cast("SlimServer", server))
+        status = await cli._handle_status(client.player_id, "-", 10, menu="menu")  # noqa: SLF001
+        return [item["text"] for item in status.get("item_loop", [])]
+
+    @pytest.mark.asyncio
+    async def test_a_late_end_of_the_flushed_stream_keeps_the_new_stream(
+        self, live_client: SlimClient
+    ) -> None:
+        """An STMd and STMu sent before the new stream's STMc leave its media."""
+        await self._play_first_track(live_client)
+
+        await live_client.play_url(url=_TRACK_URL, metadata={"title": "Two"})
+        await self._report(live_client, b"STMd", b"STMu")
+        await self._report(live_client, b"STMc", b"STMs")
+
+        assert live_client.state == PlayerState.PLAYING
+        assert live_client.current_media is not None
+        assert live_client.current_media.url == _TRACK_URL
+        assert await self._listed_tracks(live_client) == ["Two"]
+
+    @pytest.mark.asyncio
+    async def test_the_end_of_a_stream_that_never_started_stops_the_player(
+        self, live_client: SlimClient
+    ) -> None:
+        """A stream that was told to play but carried no audio ends without STMs."""
+        await self._play_first_track(live_client)
+
+        await live_client.play_url(
+            url=_TRACK_URL, metadata={"title": "Two"}, autostart=False
+        )
+        await self._report(live_client, b"STMc")
+        await live_client.unpause_at(0)
+        await self._report(live_client, b"STMr", b"STMd", b"STMu")
+
+        assert live_client.state == PlayerState.STOPPED
+        assert live_client.current_media is None
+        assert await self._listed_tracks(live_client) == []
 
 
 class TestRedirect:
