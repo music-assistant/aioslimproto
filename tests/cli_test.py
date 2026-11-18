@@ -1004,6 +1004,79 @@ class TestDisplayName:
         assert response["players_loop"][0]["name"] == "Renamed in app"
 
 
+class TestElapsedLookup:
+    """Tests for the elapsed_lookup hook used for the position in the current track."""
+
+    @staticmethod
+    async def _answers(cli: SlimProtoCLI, player: SlimClient) -> tuple[int, int]:
+        """Return the `time ?` answer and the status `time` for the player."""
+        player.current_media = MediaDetails(
+            url="http://host/stream.flac",
+            metadata={"title": "Song", "duration": 200},  # type: ignore[typeddict-item]
+        )
+        answer = await send_jsonrpc_request(cli, [player.player_id, ["time", "?"]])
+        status = await cli._handle_status(player.player_id, "-", 1)  # noqa: SLF001
+        return answer["result"]["_time"], status["time"]
+
+    @pytest.mark.asyncio
+    async def test_uses_lookup_when_it_returns_a_position(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Both answers report the looked-up position instead of the stream's own."""
+        dummy_player.elapsed_seconds = 305.2
+        cli = SlimProtoCLI(dummy_server)
+        cli.elapsed_lookup = lambda _player_id: 20.6
+
+        assert await self._answers(cli, dummy_player) == (20, 20)
+
+    @pytest.mark.asyncio
+    async def test_a_position_of_zero_is_an_answer(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """The start of a track is reported as such, not as the stream's position."""
+        dummy_player.elapsed_seconds = 305.2
+        cli = SlimProtoCLI(dummy_server)
+        cli.elapsed_lookup = lambda _player_id: 0
+
+        assert await self._answers(cli, dummy_player) == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_lookup_is_asked_for_the_player(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """The lookup gets the id of the player the answer is for."""
+        cli = SlimProtoCLI(dummy_server)
+        lookup = Mock(return_value=20.6)
+        cli.elapsed_lookup = lookup
+
+        await self._answers(cli, dummy_player)
+
+        assert {call.args for call in lookup.call_args_list} == {
+            (dummy_player.player_id,)
+        }
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_lookup_returns_none(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Both answers report the player's own position when the lookup has none."""
+        dummy_player.elapsed_seconds = 305.2
+        cli = SlimProtoCLI(dummy_server)
+        cli.elapsed_lookup = lambda _player_id: None
+
+        assert await self._answers(cli, dummy_player) == (305, 305)
+
+    @pytest.mark.asyncio
+    async def test_falls_back_without_lookup(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """With no lookup set, both answers report the player's own position."""
+        dummy_player.elapsed_seconds = 305.2
+        cli = SlimProtoCLI(dummy_server)
+
+        assert await self._answers(cli, dummy_player) == (305, 305)
+
+
 class TestCometDStaleSession:
     """Tests for requests that name a client session the server has already dropped."""
 

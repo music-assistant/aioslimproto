@@ -163,6 +163,10 @@ class SlimProtoCLI:
     # Optional hook returning the name to report for a player_id, or None to use
     # the device-reported player.name. Set by the consuming application.
     display_name_lookup: Callable[[str], str | None] | None = None
+    # Optional hook returning the seconds played of the current track to report for a
+    # player_id, or None to use the player's own elapsed time, which counts from the
+    # start of its stream. Set by the consuming application.
+    elapsed_lookup: Callable[[str], float | None] | None = None
 
     def __init__(
         self,
@@ -870,6 +874,14 @@ class SlimProtoCLI:
                 return name
         return player.name
 
+    def _elapsed_seconds(self, player: SlimClient) -> int:
+        """Return the seconds played of the current track, preferring elapsed_lookup."""
+        if self.elapsed_lookup is not None:
+            elapsed = self.elapsed_lookup(player.player_id)
+            if elapsed is not None:
+                return int(elapsed)
+        return int(player.elapsed_seconds)
+
     def _handle_players(
         self,
         player_id: str,
@@ -938,7 +950,7 @@ class SlimProtoCLI:
                 {
                     "remote": 1,
                     "current_title": self.server.name,
-                    "time": int(player.elapsed_seconds),
+                    "time": self._elapsed_seconds(player),
                     "duration": cur_item.metadata.get("duration", 0),
                 }
                 if cur_item
@@ -1132,7 +1144,7 @@ class SlimProtoCLI:
         if not player:
             return None
         if number == "?":
-            return int(player.elapsed_seconds)
+            return self._elapsed_seconds(player)
         raise NotImplementedError("No handler for seek")
 
     async def _handle_power(
