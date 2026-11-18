@@ -2,7 +2,7 @@
 
 import asyncio
 import sys
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -70,3 +70,19 @@ async def test_clients_get_the_server_clock() -> None:
         await server._create_client(Mock(), Mock())  # noqa: SLF001
 
     assert slim_client_cls.call_args.kwargs["clock"] is clock
+
+
+@pytest.mark.asyncio
+async def test_clients_get_the_initial_volume_callback() -> None:
+    """Every client of a server asks the server's callback for its initial volume."""
+    initial_volume = AsyncMock(return_value=None)
+    server = SlimServer(
+        cli_port=None,
+        cli_port_json=None,
+        ip_address="127.0.0.1",
+        initial_volume=initial_volume,
+    )
+    with patch("aioslimproto.server.SlimClient") as slim_client_cls:
+        await server._create_client(Mock(), Mock())  # noqa: SLF001
+
+    assert slim_client_cls.call_args.kwargs["initial_volume"] is initial_volume

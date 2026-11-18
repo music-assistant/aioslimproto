@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from asyncio import StreamReader, StreamWriter, create_task, timeout
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime
 import inspect
@@ -72,6 +72,7 @@ class SlimClient:
         writer: StreamWriter,
         callback: Callable[[SlimClient, EventType, Any], None],
         clock: Callable[[], float] | None = None,
+        initial_volume: Callable[[str], Awaitable[int | None]] | None = None,
     ) -> None:
         """
         Initialize the socket client.
@@ -81,9 +82,12 @@ class SlimClient:
         :param callback: Called with this client, the event type and its data.
         :param clock: Returns the current server time in seconds; every server time
             of this client is on this clock. Defaults to ``time.monotonic``.
+        :param initial_volume: Returns the volume the player starts at, by player id,
+            or None for the default.
         """
         self.callback = callback
         self._clock = clock or time.monotonic
+        self._initial_volume = initial_volume
         self.logger = logging.getLogger(__name__)
         self.volume_control = SlimProtoVolume()
         self.display_control = SlimProtoDisplay(self)
@@ -954,6 +958,10 @@ class SlimClient:
         self.min_sync_adjust = min_sync_adjust_for(self._device_type)
         self._capabilities = parse_capabilities(data)
         self.logger.debug("Player connected: %s", self.player_id)
+        if self._initial_volume and (
+            (volume := await self._initial_volume(self._player_id)) is not None
+        ):
+            self.volume_control.volume = volume
         # Use SqueezePlay volume params for SqueezePlay and Boom players (as LMS does)
         if self._device_type in SQUEEZEPLAY_VOLUME_PLAYER_TYPES:
             current_volume = self.volume_control.volume
@@ -969,8 +977,8 @@ class SlimClient:
         await self.send_frame(b"setd", struct.pack("B", 0xFE))
         await self.send_frame(b"setd", struct.pack("B", 0))
         # restore last power and volume levels
-        # NOTE: this can be improved by storing the previous volume/power levels
-        # so they can be restored when the player (re)connects.
+        # NOTE: this can be improved by storing the previous power level
+        # so it can be restored when the player (re)connects.
         # power() and volume_set() skip unchanged values, but the player has none yet
         await self._send_power(self._powered)
         await self._send_gain()
