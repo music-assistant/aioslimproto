@@ -1201,8 +1201,12 @@ class SlimProtoCLI:
         subcommand: str,
         *args,
         **kwargs,
-    ) -> None:
+    ) -> str | None:
         """Handle player 'mode' command."""
+        # <playerid> mode <play|pause|stop|?>
+        if subcommand == "?":
+            player = self.server.get_player(player_id)
+            return PLAYMODE_MAP[player.state] if player else None
         if subcommand == "play":
             return await self._handle_play(player_id, *args, **kwargs)
         if subcommand == "pause":
@@ -1259,13 +1263,18 @@ class SlimProtoCLI:
         subcommand: str,
         *args,
         **kwargs,
-    ) -> int | None:
+    ) -> str | None:
         """Handle player `playlist` command."""
         # <playerid> playlist index <index|+index|-index|?> <fadeInSecs>
         arg = args[0] if args else "?"
         player = self.server.get_player(player_id)
         if not player:
             return None
+        # <playerid> playlist <repeat|shuffle> ?
+        # answered with what the status reports, as a string like LMS does after a restart;
+        # without the "?" it is a set or toggle that the host handles
+        if subcommand in ("repeat", "shuffle") and args and args[0] == "?":
+            return str(player.extra_data.get(f"playlist {subcommand}", 0))
         # we only handle playlist index +1 - the rest is forwarded
         if subcommand == "index" and arg in (1, "1", "+1") and player.next_media:
             await player.next()
