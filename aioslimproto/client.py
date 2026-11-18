@@ -123,6 +123,8 @@ class SlimClient:
         self._device_name: str = ""
         self._powered: bool = False
         self._muted: bool = False
+        # the alarm the player keeps itself; None is sent as "no alarm"
+        self._alarm: dict[str, Any] | None = None
         self._state = PlayerState.STOPPED
         # last color sent to a Squeezebox Receiver's front LED
         self._led_color: int | None = None
@@ -556,6 +558,71 @@ class SlimClient:
     async def toggle_power(self) -> None:
         """Toggle power command."""
         await self.power(not self.powered)
+
+    def set_alarm(
+        self,
+        *,
+        next_at: int,
+        repeat: bool = True,
+        days: str = "1111111",
+        snooze_seconds: int = 540,
+        timeout_seconds: int = 3600,
+    ) -> None:
+        """Set the alarm this player keeps for itself.
+
+        A SqueezePlay player (Radio, Touch, Controller, Boom) runs its own alarm: an RTC
+        timer it arms itself, snooze, a weekday mask and a fallback tone when no audio
+        arrives. All it needs is the next time and the mask, which travel in the player
+        status document, see ``alarm_fields()``.
+
+        :param next_at: Unix time of the next alarm, in seconds; must lie in the
+            future, a player ignores an alarm in the past.
+        :param repeat: Let the player re-arm the next matching day by itself.
+        :param days: Seven characters, Sunday first, ``1`` for a day it rings.
+        :param snooze_seconds: How long the player snoozes when snooze is pressed.
+        :param timeout_seconds: When the player silences an alarm nobody dismissed.
+        """
+        if len(days) != 7 or set(days) - {"0", "1"}:
+            msg = f"days must be seven characters of 0 or 1, got {days!r}"
+            raise ValueError(msg)
+        if snooze_seconds < 0 or timeout_seconds < 0:
+            msg = "snooze_seconds and timeout_seconds must not be negative"
+            raise ValueError(msg)
+        self._alarm = {
+            "alarm_state": "set",
+            "alarm_version": 2,
+            # both spellings: pre-2 code reads alarm_next, version 2 reads alarm_next2
+            "alarm_next": next_at,
+            "alarm_next2": next_at,
+            "alarm_repeat": int(repeat),
+            "alarm_days": days,
+            "alarm_snooze_seconds": snooze_seconds,
+            "alarm_timeout_seconds": timeout_seconds,
+        }
+        self.signal_update()
+
+    def clear_alarm(self) -> None:
+        """Clear the alarm this player keeps for itself.
+
+        The keys stay in the status document with ``alarm_state`` ``none``: that is what
+        disarms a player that is already armed, so the document keeps carrying it.
+        """
+        self._alarm = None
+        self.signal_update()
+
+    def alarm_fields(self) -> dict[str, Any]:
+        """Return the alarm keys for the player status document.
+
+        :returns: ``alarm_state`` and, with an alarm set, its time, version, repeat and
+            weekday mask; snooze and timeout always, as a player reads them together.
+        """
+        if self._alarm is None:
+            return {
+                "alarm_state": "none",
+                "alarm_snooze_seconds": 540,
+                "alarm_timeout_seconds": 3600,
+            }
+        return dict(self._alarm)
 
     async def volume_set(self, volume_level: int) -> None:
         """Send new volume level command to player."""
