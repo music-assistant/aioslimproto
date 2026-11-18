@@ -21,7 +21,7 @@ from aioslimproto.cli import (
     playlist_item_from_media_details,
 )
 from aioslimproto.client import SlimClient
-from aioslimproto.models import MediaDetails, PlayerState
+from aioslimproto.models import EventType, MediaDetails, PlayerState
 from aioslimproto.server import SlimServer
 
 
@@ -747,6 +747,9 @@ class TestSingleValueQueries:
             (["mixer", "muting", "?"], {"_muting": "0"}),
             (["time", "?"], {"_time": 0}),
             (["power", "?"], {"_power": 1}),
+            (["mode", "?"], {"_mode": "stop"}),
+            (["playlist", "repeat", "?"], {"_repeat": "0"}),
+            (["playlist", "shuffle", "?"], {"_shuffle": "0"}),
         ],
     )
     async def test_builtin_query_over_jsonrpc(
@@ -786,6 +789,67 @@ class TestSingleValueQueries:
             "params": ["a5:41:d2:cd:cd:05", ["mixer", "volume", "?"]],
             "result": {"_volume": "31"},
         }
+
+    @pytest.mark.asyncio
+    async def test_wiim_polls_answer_what_the_status_reports(
+        self, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should answer the play state, repeat and shuffle polls as status does."""
+        dummy_player.state = PlayerState.PAUSED
+        dummy_player.extra_data["playlist repeat"] = 2
+        dummy_player.extra_data["playlist shuffle"] = 1
+        cli = SlimProtoCLI(dummy_server)
+
+        status = await send_jsonrpc_request(
+            cli, ["a5:41:d2:cd:cd:05", ["status", "-", 1, "tags:acdeIlKsT"]]
+        )
+        mode = await send_jsonrpc_request(cli, ["a5:41:d2:cd:cd:05", ["mode", "?"]])
+        repeat = await send_jsonrpc_request(
+            cli, ["a5:41:d2:cd:cd:05", ["playlist", "repeat", "?"]]
+        )
+        shuffle = await send_jsonrpc_request(
+            cli, ["a5:41:d2:cd:cd:05", ["playlist", "shuffle", "?"]]
+        )
+
+        assert mode["result"] == {"_mode": "pause"}
+        assert repeat["result"] == {"_repeat": "2"}
+        assert shuffle["result"] == {"_shuffle": "1"}
+        assert status["result"]["mode"] == "pause"
+        assert status["result"]["playlist repeat"] == 2
+        assert status["result"]["playlist shuffle"] == 1
+
+    @pytest.mark.asyncio
+    async def test_mode_query_over_telnet(
+        self, writer: Mock, dummy_server: SlimServer, dummy_player: SlimClient
+    ) -> None:
+        """Should fill in the play state where the text interface asked for it."""
+        dummy_player.state = PlayerState.PLAYING
+        cli = SlimProtoCLI(dummy_server)
+
+        response = await send_cli_command(cli, writer, "a5:41:d2:cd:cd:05 mode ?")
+
+        assert response == encode_response("a5:41:d2:cd:cd:05", "mode", "play")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_", [["playlist", "repeat", 2], ["playlist", "shuffle"]]
+    )
+    async def test_repeat_and_shuffle_changes_go_to_the_host(
+        self, dummy_server: SlimServer, dummy_player: SlimClient, request_: list
+    ) -> None:
+        """Should leave setting or toggling repeat and shuffle to the host."""
+        callback = Mock()
+        dummy_player.callback = callback
+        cli = SlimProtoCLI(dummy_server)
+
+        answer = await send_jsonrpc_request(cli, ["a5:41:d2:cd:cd:05", request_])
+
+        assert answer["error"] == {"code": -1, "message": "Invalid command"}
+        callback.assert_called_once_with(
+            dummy_player,
+            EventType.PLAYER_CLI_EVENT,
+            " ".join(str(arg) for arg in request_),
+        )
 
     @pytest.mark.asyncio
     async def test_builtin_query_over_cometd(self, dummy_server: SlimServer) -> None:
