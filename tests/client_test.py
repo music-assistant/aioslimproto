@@ -1754,3 +1754,71 @@ class TestHeadlessSqueezeEsp32:
 
         assert client.device_type == "squeezeesp32"
         assert client.min_sync_adjust == 10
+
+
+class TestMuteThroughGain:
+    """Mute is a gain of 0 with the level kept: aude is a stub on SqueezePlay."""
+
+    @pytest.mark.asyncio
+    async def test_mute_sends_a_gain_of_zero(self, client: SlimClient) -> None:
+        """Muting silences the player with gain 0 after the aude frame."""
+        client.send_frame = AsyncMock()
+        client.volume_control.volume = 40
+
+        await client.mute(muted=True)
+
+        assert client.muted is True
+        assert client.send_frame.await_args_list == [
+            call(b"aude", struct.pack("2B", 0, 0)),
+            call(b"audg", struct.pack("!LLBBLL", 0, 0, 1, 255, 0, 0)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unmute_restores_the_level(self, client: SlimClient) -> None:
+        """Unmuting sends the level the model kept while it was muted."""
+        client.send_frame = AsyncMock()
+        client.volume_control.volume = 40
+        client._muted = True  # noqa: SLF001
+
+        await client.mute(muted=False)
+
+        old_gain = client.volume_control.old_gain()
+        new_gain = client.volume_control.new_gain()
+        assert client.muted is False
+        assert (
+            call(
+                b"audg",
+                struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
+            )
+            in client.send_frame.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_volume_change_while_muted_stays_silent(
+        self, client: SlimClient
+    ) -> None:
+        """A volume change behind a mute updates the model, not the room."""
+        client.send_frame = AsyncMock()
+        client._muted = True  # noqa: SLF001
+
+        await client.volume_set(55)
+
+        assert client.volume_level == 55
+        gains = [
+            args
+            for args in client.send_frame.await_args_list
+            if args.args[0] == b"audg"
+        ]
+        assert gains == [call(b"audg", struct.pack("!LLBBLL", 0, 0, 1, 255, 0, 0))]
+
+    @pytest.mark.asyncio
+    async def test_mute_is_sent_even_when_the_flag_is_unchanged(
+        self, client: SlimClient
+    ) -> None:
+        """A repeated mute still silences the room: the flag may be a restored one."""
+        client.send_frame = AsyncMock()
+        client._muted = True  # noqa: SLF001
+
+        await client.mute(muted=True)
+
+        assert client.send_frame.await_count == 2

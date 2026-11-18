@@ -561,11 +561,14 @@ class SlimClient:
 
     async def mute(self, muted: bool = False) -> None:
         """Send mute command to player."""
-        if self._muted == muted:
-            return
         muted_int = 0 if muted else 1
         await self.send_frame(b"aude", struct.pack("2B", muted_int, 0))
         self._muted = muted
+        # aude silences squeezelite and piCorePlayer, but its handler on SqueezePlay
+        # hardware is a stub, so the gain is what actually mutes those players. Sent on
+        # every call: the room and the model can drift apart (a restored flag, a volume
+        # change while muted) and this is what makes them agree again.
+        await self._send_gain()
         self.signal_update()
 
     async def next(self) -> None:
@@ -1517,6 +1520,10 @@ class SlimClient:
         """Send the current volume level to the player."""
         old_gain = self.volume_control.old_gain()
         new_gain = self.volume_control.new_gain()
+        if self._muted:
+            # Silence is a gain of 0; the level stays in the model, so unmuting
+            # restores it (as LMS does: $client->volume(0), level remembered).
+            old_gain = new_gain = 0
         await self.send_frame(
             b"audg",
             struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
