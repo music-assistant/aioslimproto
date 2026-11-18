@@ -1283,6 +1283,8 @@ class SlimClient:
     async def _process_stat_stmu(self, data: bytes) -> None:
         """Process stat STMu message: Buffer underrun: Normal end of playback."""
         self.logger.debug("STMu received - end of playback.")
+        if self._awaiting_stmc:
+            return  # late end of the previous stream, before the new one's STMc
         if self._next_media:
             # fallback for a track that was neither promoted by STMd nor started
             # at enqueue time; this is the last chance to start it
