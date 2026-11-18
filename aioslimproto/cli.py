@@ -957,6 +957,7 @@ class SlimProtoCLI:
                 for index, item in enumerate(playlist_items)
             ],
             **player.extra_data,
+            **player.alarm_fields(),
         }
 
         # additional details if menu requested
@@ -980,9 +981,8 @@ class SlimProtoCLI:
                 preset_loop.append(0)
             result = {
                 **result,
-                "alarm_state": "none",
-                "alarm_snooze_seconds": 540,
-                "alarm_timeout_seconds": 3600,
+                # last, so the alarm the player keeps for itself is what the applet reads
+                **player.alarm_fields(),
                 "count": len(playlist_items),
                 "offset": offset,
                 "base": {

@@ -494,6 +494,14 @@ PlayerStatusResponse = TypedDict(
         "uuid": str,
         "playlist_tracks": int,
         "item_loop": list[PlaylistItem],
+        "alarm_state": str,
+        "alarm_next": int,
+        "alarm_next2": int,
+        "alarm_version": int,
+        "alarm_repeat": int,
+        "alarm_days": str,
+        "alarm_snooze_seconds": int,
+        "alarm_timeout_seconds": int,
     },
 )
 
