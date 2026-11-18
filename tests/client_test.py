@@ -1202,6 +1202,25 @@ class TestRestoreOnHelo:
 
         assert aude_payloads == [struct.pack("2B", int(powered), 1)]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("initial", "expected"), [(11, 11), (None, 50)])
+    async def test_helo_sends_initial_volume(
+        self, writer: Mock, initial: int | None, expected: int
+    ) -> None:
+        """The first audg carries the consumer's initial volume, else the default."""
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        initial_volume = AsyncMock(return_value=initial)
+        slim_client = SlimClient(reader, writer, Mock(), initial_volume=initial_volume)
+
+        audg_payloads = await self._connect(slim_client, b"audg")
+
+        initial_volume.assert_awaited_once_with("aa:bb:cc:dd:ee:ff")
+        assert slim_client.volume_level == expected
+        assert len(audg_payloads) == 1
+        new_gain = slim_client.volume_control.new_gain()
+        assert struct.unpack("!LLBBLL", audg_payloads[0])[4:] == (new_gain, new_gain)
+
 
 class TestSetdPlayerName:
     """SETD 0 carries the player name, with or without a NUL terminator."""

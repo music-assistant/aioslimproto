@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import inspect
 import logging
 import sys
@@ -37,6 +37,7 @@ class SlimServer:
         cli_command_handler: SlimCLICommandHandler | None = None,
         extra_routes: dict[str, SlimRouteHandler] | None = None,
         clock: Callable[[], float] | None = None,
+        initial_volume: Callable[[str], Awaitable[int | None]] | None = None,
     ) -> None:
         """
         Initialize SlimServer instance.
@@ -66,12 +67,15 @@ class SlimServer:
         - clock: Optional callable returning the current time in seconds. Every server
           time of the library (receive stamps, the player clock mapping, start_at, play
           points, SyncGroup) is on this clock. Default is time.monotonic.
+        - initial_volume: Optional async callable returning the volume a player starts
+          at when it connects, by player id, or None for the default.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
         self.name = name or get_hostname()
         self.control_port = control_port
         self._clock = clock
+        self._initial_volume = initial_volume
         self.cli = SlimProtoCLI(
             self,
             cli_port,
@@ -225,7 +229,13 @@ class SlimServer:
             # forward all other events as-is
             self.signal_event(SlimEvent(event_type, player_id, data))
 
-        SlimClient(reader, writer, client_callback, clock=self._clock)
+        SlimClient(
+            reader,
+            writer,
+            client_callback,
+            clock=self._clock,
+            initial_volume=self._initial_volume,
+        )
 
     async def __aenter__(self) -> Self:
         """Return Context manager."""
