@@ -1221,11 +1221,39 @@ class TestRestoreOnHelo:
     async def test_helo_sends_power_state(
         self, client: SlimClient, *, powered: bool
     ) -> None:
-        """The player gets the cached power state, which power() would skip."""
-        client._powered = powered  # noqa: SLF001
+        """The player gets the state of initial_power, which power() would skip."""
+        client._initial_power = AsyncMock(return_value=powered)  # noqa: SLF001
         aude_payloads = await self._connect(client, b"aude")
 
         assert aude_payloads == [struct.pack("2B", int(powered), 1)]
+        assert client.powered is powered
+
+    @pytest.mark.asyncio
+    async def test_helo_asks_initial_power_for_the_player(
+        self, client: SlimClient
+    ) -> None:
+        """initial_power gets the client, with its player_id and model set."""
+        seen = []
+
+        async def initial_power(c: SlimClient) -> None:
+            seen.append((c.player_id, c.device_model))
+
+        client._initial_power = initial_power  # noqa: SLF001
+        await self._connect(client, b"aude")
+
+        assert seen == [("aa:bb:cc:dd:ee:ff", "squeezelite")]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("initial_power", [None, AsyncMock(return_value=None)])
+    async def test_helo_powers_on_an_unknown_player(
+        self, client: SlimClient, initial_power: AsyncMock | None
+    ) -> None:
+        """Without a known state the player is powered on, as LMS does."""
+        client._initial_power = initial_power  # noqa: SLF001
+        aude_payloads = await self._connect(client, b"aude")
+
+        assert aude_payloads == [struct.pack("2B", 1, 1)]
+        assert client.powered is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("initial", "expected"), [(11, 11), (None, 50)])

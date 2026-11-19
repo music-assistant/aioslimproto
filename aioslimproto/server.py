@@ -38,6 +38,7 @@ class SlimServer:
         extra_routes: dict[str, SlimRouteHandler] | None = None,
         clock: Callable[[], float] | None = None,
         initial_volume: Callable[[str], Awaitable[int | None]] | None = None,
+        initial_power: Callable[[SlimClient], Awaitable[bool | None]] | None = None,
     ) -> None:
         """
         Initialize SlimServer instance.
@@ -69,6 +70,9 @@ class SlimServer:
           points, SyncGroup) is on this clock. Default is time.monotonic.
         - initial_volume: Optional async callable returning the volume a player starts
           at when it connects, by player id, or None for the default.
+        - initial_power: Optional async callable returning the power state a player starts
+          in when it connects, or None for the default: on, as LMS does for a player it
+          does not know. It gets the client once its player_id and device model are known.
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
@@ -76,6 +80,7 @@ class SlimServer:
         self.control_port = control_port
         self._clock = clock
         self._initial_volume = initial_volume
+        self._initial_power = initial_power
         self.cli = SlimProtoCLI(
             self,
             cli_port,
@@ -235,6 +240,7 @@ class SlimServer:
             client_callback,
             clock=self._clock,
             initial_volume=self._initial_volume,
+            initial_power=self._initial_power,
         )
 
     async def __aenter__(self) -> Self:
