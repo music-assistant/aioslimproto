@@ -240,8 +240,11 @@ PCM_SAMPLE_RATE = {
     # https://wiki.slimdevices.com/index.php/SlimProto_TCP_protocol.html#Command:_.22strm.22
     # See %pcm_sample_rates in slimserver/Slim/Player/Squeezebox2.pm and
     # slimserver/Slim/Player/SqueezePlay.pm for definition of sample rates
-    11000: b"0",
-    22000: b"1",
+    # The protocol page rounds codes 0 and 1 to 11 kHz and 22 kHz: LMS and
+    # squeezelite use 11025 and 22050.
+    11025: b"0",
+    22050: b"1",
+    32000: b"2",
     44100: b"3",
     48000: b"4",
     8000: b"5",
