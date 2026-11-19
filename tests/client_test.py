@@ -1222,6 +1222,73 @@ class TestRestoreOnHelo:
         assert struct.unpack("!LLBBLL", audg_payloads[0])[4:] == (new_gain, new_gain)
 
 
+def _gains(audg_payload: bytes) -> tuple[int, int]:
+    """Return the (old, new) left-channel gain of an audg payload."""
+    old_gain, _, _, _, new_gain, _ = struct.unpack("!LLBBLL", audg_payload)
+    return old_gain, new_gain
+
+
+class TestMute:
+    """Mute sends zero gain, since aude would switch the player's output off."""
+
+    @staticmethod
+    def _frames(client: SlimClient, command: bytes) -> list[bytes]:
+        """Return the payloads sent for command."""
+        send_frame = cast("AsyncMock", client.send_frame)
+        return [
+            frame.args[1]
+            for frame in send_frame.await_args_list
+            if frame.args[0] == command
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mute_sends_zero_gain(self, client: SlimClient) -> None:
+        """Muting sends a zero-gain audg and no aude."""
+        client.send_frame = AsyncMock()
+
+        await client.mute(True)  # noqa: FBT003
+
+        assert client.muted is True
+        assert [_gains(p) for p in self._frames(client, b"audg")] == [(0, 0)]
+        assert self._frames(client, b"aude") == []
+
+    @pytest.mark.asyncio
+    async def test_unmute_restores_volume(self, client: SlimClient) -> None:
+        """Unmuting sends the stored volume's gain again."""
+        client.send_frame = AsyncMock()
+        await client.mute(True)  # noqa: FBT003
+
+        await client.mute(False)  # noqa: FBT003
+
+        expected = (
+            client.volume_control.old_gain(),
+            int(client.volume_control.new_gain()),
+        )
+        assert client.muted is False
+        assert _gains(self._frames(client, b"audg")[-1]) == expected
+
+    @pytest.mark.asyncio
+    async def test_volume_set_while_muted(self, client: SlimClient) -> None:
+        """A volume change while muted stays silent and is applied on unmute."""
+        client.send_frame = AsyncMock()
+        await client.mute(True)  # noqa: FBT003
+
+        await client.volume_set(20)
+
+        assert client.muted is True
+        assert client.volume_level == 20
+        assert _gains(self._frames(client, b"audg")[-1]) == (0, 0)
+
+        await client.mute(False)  # noqa: FBT003
+
+        expected = (
+            client.volume_control.old_gain(),
+            int(client.volume_control.new_gain()),
+        )
+        assert expected != (0, 0)
+        assert _gains(self._frames(client, b"audg")[-1]) == expected
+
+
 class TestSetdPlayerName:
     """SETD 0 carries the player name, with or without a NUL terminator."""
 
