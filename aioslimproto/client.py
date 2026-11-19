@@ -87,7 +87,8 @@ class SlimClient:
             or None for the default.
         :param initial_power: Returns the power state the player starts in, given this
             client once its player id and device model are known, or None for the
-            default: on, as LMS does for a player it does not know.
+            default (off). An application can restore the last state with it, as LMS
+            does (on for a player it does not know).
         """
         self.callback = callback
         self._clock = clock or time.monotonic
@@ -966,11 +967,12 @@ class SlimClient:
             (volume := await self._initial_volume(self._player_id)) is not None
         ):
             self.volume_control.volume = volume
-        # restore the power state like LMS does: the one the application kept for this
-        # player, or on for a player it does not know (LMS' 'power' default).
-        # SqueezePlay players report their own state right after connecting.
-        powered = await self._initial_power(self) if self._initial_power else None
-        self._powered = True if powered is None else powered
+        # the power state the application keeps for this player (LMS restores it on
+        # connect), else off; SqueezePlay players report their own state right after
+        if self._initial_power and (
+            (powered := await self._initial_power(self)) is not None
+        ):
+            self._powered = powered
         # Use SqueezePlay volume params for SqueezePlay and Boom players (as LMS does)
         if self._device_type in SQUEEZEPLAY_VOLUME_PLAYER_TYPES:
             current_volume = self.volume_control.volume

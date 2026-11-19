@@ -1245,15 +1245,15 @@ class TestRestoreOnHelo:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("initial_power", [None, AsyncMock(return_value=None)])
-    async def test_helo_powers_on_an_unknown_player(
+    async def test_helo_keeps_the_player_off_without_a_state(
         self, client: SlimClient, initial_power: AsyncMock | None
     ) -> None:
-        """Without a known state the player is powered on, as LMS does."""
+        """Without a state from initial_power the player starts off, as before."""
         client._initial_power = initial_power  # noqa: SLF001
         aude_payloads = await self._connect(client, b"aude")
 
-        assert aude_payloads == [struct.pack("2B", 1, 1)]
-        assert client.powered is True
+        assert aude_payloads == [struct.pack("2B", 0, 1)]
+        assert client.powered is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("initial", "expected"), [(11, 11), (None, 50)])

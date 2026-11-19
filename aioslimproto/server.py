@@ -71,8 +71,9 @@ class SlimServer:
         - initial_volume: Optional async callable returning the volume a player starts
           at when it connects, by player id, or None for the default.
         - initial_power: Optional async callable returning the power state a player starts
-          in when it connects, or None for the default: on, as LMS does for a player it
-          does not know. It gets the client once its player_id and device model are known.
+          in when it connects, or None for the default (off). It gets the client once its
+          player_id and device model are known; an application can restore the last state
+          with it, as LMS does (on for a player it does not know).
         """  # noqa: E501
         self.logger = logging.getLogger(__name__)
         self.ip_address = ip_address or get_ip()
