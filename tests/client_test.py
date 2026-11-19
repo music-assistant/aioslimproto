@@ -1846,3 +1846,59 @@ class TestHeadlessSqueezeEsp32:
 
         assert client.device_type == "squeezeesp32"
         assert client.min_sync_adjust == 10
+
+
+class TestGainAfterPowerOn:
+    """A player that powers on gets the level from the model, not the one it kept."""
+
+    @pytest.mark.asyncio
+    async def test_power_on_sends_the_gain(self, client: SlimClient) -> None:
+        """A power-on sends aude and then the gain."""
+        client.send_frame = AsyncMock()
+        client.volume_control.volume = 30
+
+        await client.power(powered=True)
+
+        old_gain = client.volume_control.old_gain()
+        new_gain = client.volume_control.new_gain()
+        assert client.send_frame.await_args_list[0] == call(
+            b"aude", struct.pack("2B", 1, 1)
+        )
+        assert (
+            call(
+                b"audg",
+                struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
+            )
+            in client.send_frame.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_power_on_while_muted_sends_zero_gain(
+        self, client: SlimClient
+    ) -> None:
+        """A muted player that powers on is given zero gain, not its stored level."""
+        client.send_frame = AsyncMock()
+        client.volume_control.volume = 12
+        await client.mute(True)  # noqa: FBT003
+        client._powered = False  # noqa: SLF001
+
+        await client.power(powered=True)
+
+        gains = [
+            _gains(c.args[1])
+            for c in client.send_frame.await_args_list
+            if c.args[0] == b"audg"
+        ]
+        assert gains, "a power-on while muted sends no gain frame at all"
+        assert gains[-1] == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_power_off_sends_no_gain(self, client: SlimClient) -> None:
+        """Powering off stops the player and does not touch the gain."""
+        client.send_frame = AsyncMock()
+        client._powered = True  # noqa: SLF001
+
+        await client.power(powered=False)
+
+        assert b"aude" in [c.args[0] for c in client.send_frame.await_args_list]
+        assert b"audg" not in [c.args[0] for c in client.send_frame.await_args_list]

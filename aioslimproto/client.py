@@ -528,6 +528,10 @@ class SlimClient:
         if not powered:
             await self.stop()
         await self._send_power(powered)
+        if powered:
+            # A player that comes out of standby keeps its own gain and aude carries
+            # none, so give it the level from the model (a muted player: 0).
+            await self._send_gain()
         self._powered = powered
         self.signal_update()
         await self._render_display()
