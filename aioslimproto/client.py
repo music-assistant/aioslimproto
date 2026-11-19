@@ -560,12 +560,11 @@ class SlimClient:
         await self._render_display("show_volume")
 
     async def mute(self, muted: bool = False) -> None:
-        """Send mute command to player."""
+        """Mute or unmute the player; volume changes while muted apply on unmute."""
         if self._muted == muted:
             return
-        muted_int = 0 if muted else 1
-        await self.send_frame(b"aude", struct.pack("2B", muted_int, 0))
         self._muted = muted
+        await self._send_gain()
         self.signal_update()
 
     async def next(self) -> None:
@@ -1514,9 +1513,13 @@ class SlimClient:
         await self.send_frame(b"aude", struct.pack("2B", int(powered), 1))
 
     async def _send_gain(self) -> None:
-        """Send the current volume level to the player."""
-        old_gain = self.volume_control.old_gain()
-        new_gain = self.volume_control.new_gain()
+        """Send the current volume level to the player, or zero gain while muted."""
+        # zero gain like LMS: aude would switch the output off (and WiiM pauses on it)
+        old_gain: int = 0
+        new_gain: float = 0
+        if not self._muted:
+            old_gain = self.volume_control.old_gain()
+            new_gain = self.volume_control.new_gain()
         await self.send_frame(
             b"audg",
             struct.pack("!LLBBLL", old_gain, old_gain, 1, 255, new_gain, new_gain),
