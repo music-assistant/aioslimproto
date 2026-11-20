@@ -9,6 +9,10 @@ FALLBACK_MODEL = "Squeezebox"
 FALLLBACK_FIRMWARE = "Unknown"
 FALLBACK_SAMPLE_RATE = 96000
 HEARTBEAT_INTERVAL = 5
+# Squeezebox Receiver front LED colors (0x00RRGGBB), as LMS Slim/Player/Receiver.pm
+RECEIVER_LED_PLAYING = 0x00F0F0F0
+RECEIVER_LED_IDLE = 0x00101010
+RECEIVER_LED_OFF = 0x00000000
 
 # ---------------------------------------------------------------------------
 # Synchronisation constants, ported 1:1 from Lyrion Music Server
