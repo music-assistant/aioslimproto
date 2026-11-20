@@ -35,6 +35,9 @@ from .const import (
     JIFFIES_OFFSET_TRACKING_LIST_MIN,
     JIFFIES_OFFSET_TRACKING_LIST_SIZE,
     PACKET_LATENCY,
+    RECEIVER_LED_IDLE,
+    RECEIVER_LED_OFF,
+    RECEIVER_LED_PLAYING,
 )
 from .display import SlimProtoDisplay
 from .errors import UnsupportedContentType
@@ -115,6 +118,8 @@ class SlimClient:
         self._powered: bool = False
         self._muted: bool = False
         self._state = PlayerState.STOPPED
+        # last color sent to a Squeezebox Receiver's front LED
+        self._led_color: int | None = None
         self._jiffies: int = 0
         # when _jiffies was reported; kept apart from _last_timestamp, which is
         # also reset when a stream is flushed or started
@@ -798,7 +803,38 @@ class SlimClient:
 
     def signal_update(self) -> None:
         """Signal a player updated event to listeners."""
+        if (
+            self._device_type == "receiver"
+            and self._led_color != self._receiver_led_color()
+        ):
+            asyncio.create_task(self._update_receiver_led())
         self.callback(self, EventType.PLAYER_UPDATED)
+
+    def _receiver_led_color(self) -> int:
+        """Return the front LED color for the current state, like LMS Receiver.pm."""
+        if not self.powered:
+            return RECEIVER_LED_OFF
+        if self._state in (
+            PlayerState.PLAYING,
+            PlayerState.BUFFERING,
+            PlayerState.BUFFER_READY,
+        ):
+            return RECEIVER_LED_PLAYING
+        return RECEIVER_LED_IDLE
+
+    async def _update_receiver_led(self) -> None:
+        """Set a Squeezebox Receiver's front LED to match the player state.
+
+        The Receiver has no display; its LED is driven by the server only
+        (LMS Slim/Hardware/TriLED.pm): bright white while playing, dim white
+        when on but not playing, and off when powered off.
+        """
+        color = self._receiver_led_color()
+        if color == self._led_color:
+            return
+        self._led_color = color
+        # color, on time, off time (0: no blinking), times, transition
+        await self.send_frame(b"ledc", struct.pack("!IHHBB", color, 0, 0, 0, 1))
 
     async def send_frame(self, command: bytes, data: bytes) -> None:
         """Send (raw) command to Squeeze player."""
@@ -981,6 +1017,10 @@ class SlimClient:
         # power() and volume_set() skip unchanged values, but the player has none yet
         await self._send_power(self._powered)
         await self._send_gain()
+        if self._device_type == "receiver":
+            # the player keeps no LED state of its own over a reconnect
+            self._led_color = None
+            await self._update_receiver_led()
         if (
             self._reader.at_eof()
             or self._writer.is_closing()
