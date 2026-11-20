@@ -1612,6 +1612,22 @@ class TestSqueezePlayVolumeCurve:
     @pytest.mark.parametrize(
         ("device_id", "what"),
         [
+            (100, "SqueezeESP32 with a display"),
+            (101, "SqueezeESP32 without a display"),
+        ],
+    )
+    async def test_squeezeesp32_gets_the_curve_lms_drives_it_with(
+        self, client: SlimClient, device_id: int, what: str
+    ) -> None:
+        """SqueezeESP32 gets the SqueezePlay curve, as LMS gives it."""
+        curve = await self._curve(client, device_id)
+
+        assert curve == (-74, 25, 0.5), what
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("device_id", "what"),
+        [
             (2, "Squeezebox"),
             (4, "Squeezebox2/Classic"),
             (5, "Transporter"),

@@ -87,6 +87,9 @@ DEVICE_TYPE = {
 # Player types that use SqueezePlay volume parameters (wider -74dB range with two-slope
 # curve) instead of the Squeezebox2 defaults. SqueezePlay firmware (Radio, Touch,
 # Controller, software) and the Boom map every gain they receive through this curve.
+# SqueezeESP32 applies the gain as sent, and LMS drives it with this curve too: the
+# SqueezeESP32 plugin subclasses SqueezePlay, and without the plugin LMS answers the
+# unknown device id with DSCO, after which the firmware reconnects as id 12.
 SQUEEZEPLAY_VOLUME_PLAYER_TYPES: frozenset[str] = frozenset(
     {
         "squeezeplay",
@@ -95,6 +98,7 @@ SQUEEZEPLAY_VOLUME_PLAYER_TYPES: frozenset[str] = frozenset(
         "softboom",
         "controller",
         "boom",
+        "squeezeesp32",
     }
 )
 
