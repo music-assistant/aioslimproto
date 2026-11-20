@@ -73,6 +73,7 @@ class SlimClient:
         callback: Callable[[SlimClient, EventType, Any], None],
         clock: Callable[[], float] | None = None,
         initial_volume: Callable[[str], Awaitable[int | None]] | None = None,
+        initial_power: Callable[[SlimClient], Awaitable[bool | None]] | None = None,
     ) -> None:
         """
         Initialize the socket client.
@@ -84,10 +85,15 @@ class SlimClient:
             of this client is on this clock. Defaults to ``time.monotonic``.
         :param initial_volume: Returns the volume the player starts at, by player id,
             or None for the default.
+        :param initial_power: Returns the power state the player starts in, given this
+            client once its player id and device model are known, or None for the
+            default (off). An application can restore the last state with it, as LMS
+            does (on for a player it does not know).
         """
         self.callback = callback
         self._clock = clock or time.monotonic
         self._initial_volume = initial_volume
+        self._initial_power = initial_power
         self.logger = logging.getLogger(__name__)
         self.volume_control = SlimProtoVolume()
         self.display_control = SlimProtoDisplay(self)
@@ -961,6 +967,12 @@ class SlimClient:
             (volume := await self._initial_volume(self._player_id)) is not None
         ):
             self.volume_control.volume = volume
+        # the power state the application keeps for this player (LMS restores it on
+        # connect), else off; SqueezePlay players report their own state right after
+        if self._initial_power and (
+            (powered := await self._initial_power(self)) is not None
+        ):
+            self._powered = powered
         # Use SqueezePlay volume params for SqueezePlay and Boom players (as LMS does)
         if self._device_type in SQUEEZEPLAY_VOLUME_PLAYER_TYPES:
             current_volume = self.volume_control.volume
@@ -975,9 +987,7 @@ class SlimClient:
         # request player to send the player name
         await self.send_frame(b"setd", struct.pack("B", 0xFE))
         await self.send_frame(b"setd", struct.pack("B", 0))
-        # restore last power and volume levels
-        # NOTE: this can be improved by storing the previous power level
-        # so it can be restored when the player (re)connects.
+        # send the power state and volume set above;
         # power() and volume_set() skip unchanged values, but the player has none yet
         await self._send_power(self._powered)
         await self._send_gain()
