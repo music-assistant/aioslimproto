@@ -951,6 +951,195 @@ class TestOutputUnderrun:
         assert underrun not in live_client.callback.mock_calls
 
 
+def _stat(event: bytes) -> bytes:
+    """Build a STAT packet for the given event, as the player sends it."""
+    return _frame(b"STAT", event + bytes(47))
+
+
+class TestShortStreamStarts:
+    """A stream that ends before the player starts playing it gets started.
+
+    squeezelite starts output only once more than output_threshold (2 seconds by
+    default) of audio is buffered. A shorter stream, such as a TTS clip, never
+    reaches that, so like LMS we unpause the player when the stream has ended.
+    """
+
+    @pytest.fixture
+    async def player(self, writer: Mock) -> tuple[SlimClient, asyncio.StreamReader]:
+        """Create a client with a live packet reader and a stubbed strm sender."""
+        reader = asyncio.StreamReader()
+        slim_client = SlimClient(reader, writer, Mock())
+        slim_client._send_strm = AsyncMock()  # noqa: SLF001
+        slim_client._powered = True  # noqa: SLF001
+        return slim_client, reader
+
+    @staticmethod
+    async def _receive(reader: asyncio.StreamReader, *packets: bytes) -> None:
+        """Let the player send packets and wait until they are handled."""
+        reader.feed_data(b"".join(packets))
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    @staticmethod
+    def _unpaused(slim_client: SlimClient) -> bool:
+        """Return whether the client told the player to start playing."""
+        return (
+            call(b"u", replay_gain=0) in slim_client._send_strm.mock_calls  # noqa: SLF001
+        )
+
+    async def _play_and_receive(
+        self,
+        player: tuple[SlimClient, asyncio.StreamReader],
+        *packets: bytes,
+        **play_kwargs: Any,
+    ) -> SlimClient:
+        """Start a url, let the player send packets, and return the client."""
+        slim_client, reader = player
+        await slim_client.play_url(url=_TRACK_URL, **play_kwargs)
+        slim_client._send_strm.reset_mock()  # noqa: SLF001
+        await self._receive(reader, *packets)
+        return slim_client
+
+    @pytest.mark.asyncio
+    async def test_short_stream_is_started(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A stream that ended before playback started is unpaused."""
+        slim_client = await self._play_and_receive(
+            player, _stat(b"STMc"), _frame(b"DSCO", b"\x00")
+        )
+
+        assert self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_short_stream_after_end_of_playback_is_started(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A short track started when the previous one ended (STMu) is unpaused."""
+        slim_client, reader = player
+        await self._play_and_receive(player, _stat(b"STMc"), _stat(b"STMs"))
+        await slim_client.play_url(url=_TRACK_URL, enqueue=True)
+
+        await self._receive(reader, _stat(b"STMu"))
+        slim_client._send_strm.reset_mock()  # noqa: SLF001
+        await self._receive(reader, _stat(b"STMc"), _frame(b"DSCO", b"\x00"))
+
+        assert self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_short_stream_after_a_stop_is_started(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A short track started without a flush after a stop is unpaused."""
+        slim_client, _ = player
+        await self._play_and_receive(player, _stat(b"STMc"), _stat(b"STMs"))
+        await slim_client.stop()
+
+        await self._play_and_receive(
+            player, _stat(b"STMc"), _frame(b"DSCO", b"\x00"), send_flush=False
+        )
+
+        assert self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_gapless_stream_is_left_to_play_on(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A track queued behind one that still plays (STMd) needs no unpause."""
+        slim_client, reader = player
+        await self._play_and_receive(player, _stat(b"STMc"), _stat(b"STMs"))
+        await slim_client.play_url(url=_TRACK_URL, enqueue=True)
+
+        await self._receive(reader, _stat(b"STMd"))
+        slim_client._send_strm.reset_mock()  # noqa: SLF001
+        await self._receive(reader, _stat(b"STMc"), _frame(b"DSCO", b"\x00"))
+
+        assert not self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_stream_that_already_plays_is_left_alone(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A stream that ends after playback started needs no unpause."""
+        slim_client = await self._play_and_receive(
+            player, _stat(b"STMc"), _stat(b"STMs"), _frame(b"DSCO", b"\x00")
+        )
+
+        assert not self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_failed_stream_is_not_started(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A stream that broke off (remote disconnect) isn't started."""
+        slim_client = await self._play_and_receive(
+            player, _stat(b"STMc"), _frame(b"DSCO", b"\x02")
+        )
+
+        assert not self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_stream_without_autostart_waits_for_the_host(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A stream started without autostart (e.g. synced) is left to the host."""
+        slim_client = await self._play_and_receive(
+            player, _stat(b"STMc"), _frame(b"DSCO", b"\x00"), autostart=False
+        )
+
+        assert not self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stmc_seen", [False, True])
+    async def test_end_before_the_streams_stmc_is_ignored(
+        self, player: tuple[SlimClient, asyncio.StreamReader], *, stmc_seen: bool
+    ) -> None:
+        """The end of an earlier stream, before this one's STMc, starts nothing.
+
+        Also for the first stream after a (re)connect, before any STMc was seen.
+        """
+        slim_client, _ = player
+        slim_client._stmc_seen = stmc_seen  # noqa: SLF001
+        await self._play_and_receive(player, _frame(b"DSCO", b"\x00"))
+
+        assert not self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_end_of_replaced_stream_during_flush_is_ignored(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """The end of a stream that play_url is replacing starts nothing."""
+        slim_client, _ = player
+        await self._play_and_receive(player, _stat(b"STMc"))
+
+        async def send_strm(command: bytes, **_: Any) -> None:
+            if command == b"f":
+                await slim_client._process_dsco(b"\x00")  # noqa: SLF001
+
+        slim_client._send_strm.side_effect = send_strm  # noqa: SLF001
+        await slim_client.play_url(url=_TRACK_URL)
+
+        assert not self._unpaused(slim_client)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["stop", "pause"])
+    async def test_stopped_or_paused_player_is_left_alone(
+        self, player: tuple[SlimClient, asyncio.StreamReader], *, action: str
+    ) -> None:
+        """A stream that ends after the host stopped or paused it starts nothing."""
+        slim_client, reader = player
+        await self._play_and_receive(player, _stat(b"STMc"))
+        if action == "stop":
+            await slim_client.stop()
+        else:
+            await slim_client.pause()
+        slim_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await self._receive(reader, _frame(b"DSCO", b"\x00"))
+
+        assert not self._unpaused(slim_client)
+
+
 class TestStopAfterUnderrun:
     """A player the host stops after an underrun stays stopped."""
 
