@@ -810,8 +810,19 @@ class SlimClient:
             asyncio.create_task(self._update_receiver_led())
         self.callback(self, EventType.PLAYER_UPDATED)
 
+    async def send_frame(self, command: bytes, data: bytes) -> None:
+        """Send (raw) command to Squeeze player."""
+        # the reader signals a lost connection; disconnect() here would cancel it first
+        if self._reader.at_eof() or self._writer.is_closing():
+            self.logger.debug("Socket is disconnected.")
+            return
+        packet = struct.pack("!H", len(data) + 4) + command + data
+        with suppress(ConnectionError):
+            self._writer.write(packet)
+            await self._writer.drain()
+
     def _receiver_led_color(self) -> int:
-        """Return the front LED color for the current state, like LMS Receiver.pm."""
+        """Return the Receiver's front LED color for the current player state."""
         if not self.powered:
             return RECEIVER_LED_OFF
         if self._state in (
@@ -823,29 +834,13 @@ class SlimClient:
         return RECEIVER_LED_IDLE
 
     async def _update_receiver_led(self) -> None:
-        """Set a Squeezebox Receiver's front LED to match the player state.
-
-        The Receiver has no display; its LED is driven by the server only
-        (LMS Slim/Hardware/TriLED.pm): bright white while playing, dim white
-        when on but not playing, and off when powered off.
-        """
+        """Send the Receiver's front LED color if it changed."""
         color = self._receiver_led_color()
         if color == self._led_color:
             return
         self._led_color = color
         # color, on time, off time (0: no blinking), times, transition
         await self.send_frame(b"ledc", struct.pack("!IHHBB", color, 0, 0, 0, 1))
-
-    async def send_frame(self, command: bytes, data: bytes) -> None:
-        """Send (raw) command to Squeeze player."""
-        # the reader signals a lost connection; disconnect() here would cancel it first
-        if self._reader.at_eof() or self._writer.is_closing():
-            self.logger.debug("Socket is disconnected.")
-            return
-        packet = struct.pack("!H", len(data) + 4) + command + data
-        with suppress(ConnectionError):
-            self._writer.write(packet)
-            await self._writer.drain()
 
     async def _render_display(self, action: str | None = None) -> None:
         """Set display based on the current state."""

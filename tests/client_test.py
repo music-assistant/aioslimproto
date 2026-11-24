@@ -1859,7 +1859,7 @@ def _led_colors(client: SlimClient) -> list[int]:
 
 
 class TestReceiverLed:
-    """A Squeezebox Receiver's front LED follows the player state, like LMS."""
+    """A Squeezebox Receiver's front LED follows the player state."""
 
     @pytest.fixture
     def receiver(self, client: SlimClient) -> SlimClient:
