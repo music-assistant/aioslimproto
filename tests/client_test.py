@@ -1862,3 +1862,85 @@ class TestHeadlessSqueezeEsp32:
 
         assert client.device_type == "squeezeesp32"
         assert client.min_sync_adjust == 10
+
+
+def _led_colors(client: SlimClient) -> list[int]:
+    """Return the colors of the ledc frames sent, in order."""
+    send_frame = cast("AsyncMock", client.send_frame)
+    return [
+        struct.unpack("!IHHBB", frame.args[1])[0]
+        for frame in send_frame.await_args_list
+        if frame.args[0] == b"ledc"
+    ]
+
+
+class TestReceiverLed:
+    """A Squeezebox Receiver's front LED follows the player state."""
+
+    @pytest.fixture
+    def receiver(self, client: SlimClient) -> SlimClient:
+        """Return the client as a powered-off Squeezebox Receiver."""
+        client._device_type = "receiver"  # noqa: SLF001
+        client.send_frame = AsyncMock()
+        return client
+
+    @staticmethod
+    async def _set(client: SlimClient, state: PlayerState, *, powered: bool) -> None:
+        """Change the player state and let the LED update run."""
+        client._state = state  # noqa: SLF001
+        client._powered = powered  # noqa: SLF001
+        client.signal_update()
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_led_follows_state(self, receiver: SlimClient) -> None:
+        """Bright white while playing, dim white when on, off when powered off."""
+        await self._set(receiver, PlayerState.STOPPED, powered=True)
+        await self._set(receiver, PlayerState.PLAYING, powered=True)
+        await self._set(receiver, PlayerState.PAUSED, powered=True)
+        await self._set(receiver, PlayerState.STOPPED, powered=False)
+
+        assert _led_colors(receiver) == [0x101010, 0xF0F0F0, 0x101010, 0x000000]
+
+    @pytest.mark.asyncio
+    async def test_unchanged_color_is_not_resent(self, receiver: SlimClient) -> None:
+        """Updates that keep the LED color send no new ledc frame."""
+        await self._set(receiver, PlayerState.PLAYING, powered=True)
+        await self._set(receiver, PlayerState.BUFFERING, powered=True)
+        await self._set(receiver, PlayerState.PLAYING, powered=True)
+
+        assert _led_colors(receiver) == [0xF0F0F0]
+
+    @pytest.mark.asyncio
+    async def test_ledc_frame_layout(self, receiver: SlimClient) -> None:
+        """The frame is color, on/off time and times (no blinking), transition."""
+        await self._set(receiver, PlayerState.PLAYING, powered=True)
+
+        send_frame = cast("AsyncMock", receiver.send_frame)
+        send_frame.assert_awaited_once_with(
+            b"ledc", b"\x00\xf0\xf0\xf0\x00\x00\x00\x00\x00\x01"
+        )
+
+    @pytest.mark.asyncio
+    async def test_other_players_get_no_ledc(self, client: SlimClient) -> None:
+        """Only the Receiver is sent ledc frames."""
+        client._device_type = "squeezelite"  # noqa: SLF001
+        client.send_frame = AsyncMock()
+
+        await self._set(client, PlayerState.PLAYING, powered=True)
+
+        assert _led_colors(client) == []
+
+    @pytest.mark.asyncio
+    async def test_led_is_set_on_helo(self, client: SlimClient) -> None:
+        """A (re)connecting Receiver gets its LED set, even to an unchanged color."""
+        client.send_frame = AsyncMock()
+        client._led_color = 0x000000  # noqa: SLF001
+
+        await client._process_helo(  # noqa: SLF001
+            bytes([7, 0]) + b"\x00\x04\x20\xaa\xbb\xcc" + bytes(28)
+        )
+        client.disconnect()
+
+        assert client.device_type == "receiver"
+        assert _led_colors(client) == [0x000000]
