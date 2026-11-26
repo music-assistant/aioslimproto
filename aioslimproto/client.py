@@ -138,6 +138,12 @@ class SlimClient:
         self._awaiting_stmc: bool = False
         # the stale RESP guard only applies to players known to send STMc
         self._stmc_seen: bool = False
+        # set once the current stream's STMc arrived; any end of stream (DSCO)
+        # reported before that belongs to an earlier stream
+        self._stream_stmc: bool = False
+        # set while the player's output plays nothing (after a flush or STMu, until
+        # STMs), so a stream that ends before playback started must be unpaused
+        self._output_idle: bool = True
         self._current_media: MediaDetails | None = None
         self._buffering_media: MediaDetails | None = None
         self._next_media: MediaDetails | None = None
@@ -485,6 +491,7 @@ class SlimClient:
         # invalidate any pre-enqueued track so a late STMu can't resume playback
         self._next_media = None
         self._decoder_ready = False
+        self._output_idle = True
         if self._state == PlayerState.STOPPED:
             return
         await self._send_strm(b"q", flags=0)
@@ -626,7 +633,12 @@ class SlimClient:
             raise UnsupportedContentType(f"Invalid URL: {url}")  # noqa: TRY003
 
         send_flush = send_flush and not enqueue
+        if not enqueue or self._decoder_ready:
+            # a new stream replaces the current one: until its STMc, a reported
+            # end of stream is the current one's
+            self._stream_stmc = False
         if send_flush:
+            self._output_idle = True
             # flush buffers before playback of a new track
             await self._send_strm(b"f", autostart=b"0")
             await self._send_strm(b"q", flags=0)
@@ -721,6 +733,7 @@ class SlimClient:
         )
         self._auto_play = autostart
         self._awaiting_stmc = self._stmc_seen
+        self._stream_stmc = False
         await self._send_strm(
             command=b"s",
             codec_details=codec_details,
@@ -1129,12 +1142,24 @@ class SlimClient:
             return False
         return True
 
-    def _process_dsco(self, data: bytes) -> None:
+    async def _process_dsco(self, data: bytes) -> None:
         """Process incoming stat DSCO message (data stream disconnected)."""
         self.logger.debug("DSCO received - data stream disconnected.")
         # Some players may send this to indicate they have disconnected
         # from the data stream either because the stream ended, or because
         # they have finished buffering the current file
+        if (
+            data[:1] == b"\x00"  # the stream ended normally
+            and self._stream_stmc  # it is the current stream
+            and self._output_idle  # nothing else is playing ahead of it
+            and self._auto_play
+            and self._state in (PlayerState.BUFFERING, PlayerState.PLAYING)
+        ):
+            # squeezelite only starts output once output_threshold of audio is
+            # buffered, which a stream shorter than that (e.g. a TTS clip) never
+            # reaches. Like LMS, start the player now that nothing more will come.
+            self.logger.debug("Stream ended before playback started, starting it.")
+            await self.unpause_at(0)
 
     async def _process_stat(self, data: bytes, received: float) -> None:
         """Redirect incoming STAT event from player to correct method."""
@@ -1175,6 +1200,7 @@ class SlimClient:
         # srtm-s command received. Guaranteed to be the first response to an strm-s.
         self._stmc_seen = True
         self._awaiting_stmc = False
+        self._stream_stmc = True
 
     def _process_stat_stmd(self, data: bytes) -> None:
         """Process incoming stat STMd message (decoder ready)."""
@@ -1240,6 +1266,7 @@ class SlimClient:
         """Process incoming stat STMs message: Playback of new track has started."""
         self.logger.debug("STMs received - playback of new track has started")
         self._state = PlayerState.PLAYING
+        self._output_idle = False
         # a new track just started at position 0; reset the elapsed baseline and
         # resume honouring STMt heartbeats (they now report the new stream)
         self._elapsed_milliseconds = 0
@@ -1327,6 +1354,7 @@ class SlimClient:
         self.logger.debug("STMu received - end of playback.")
         if self._awaiting_stmc:
             return  # late end of the previous stream, before the new one's STMc
+        self._output_idle = True
         if self._next_media:
             # fallback for a track that was neither promoted by STMd nor started
             # at enqueue time; this is the last chance to start it
