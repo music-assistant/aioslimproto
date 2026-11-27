@@ -25,6 +25,7 @@ from aioslimproto.server import SlimServer
 # a cont frame as LMS sends it: metaint (no ICY metadata), loop and guid count
 _CONT_PAYLOAD = struct.pack("!IBH", 0, 0, 0)
 _TRACK_URL = "http://127.0.0.1:8080/track.wav"
+_NEXT_URL = "http://127.0.0.1:8080/next.wav"
 _RESP_OK = b"HTTP/1.0 200 OK\r\nContent-Type: audio/wav\r\n\r\n"
 
 
@@ -1138,6 +1139,170 @@ class TestShortStreamStarts:
         await self._receive(reader, _frame(b"DSCO", b"\x00"))
 
         assert not self._unpaused(slim_client)
+
+
+class TestPausedPlayerStaysPaused:
+    """
+    A paused player plays on only when resumed or given a new stream.
+
+    squeezelite starts its output again for a stream started with autostart once it
+    is buffered, also while paused, and the host answers a buffer ready (STMl) with
+    an unpause.
+    """
+
+    @pytest.fixture
+    async def player(self, writer: Mock) -> tuple[SlimClient, asyncio.StreamReader]:
+        """Create a client with a live packet reader and a stubbed strm sender."""
+        reader = asyncio.StreamReader()
+        slim_client = SlimClient(reader, writer, Mock())
+        slim_client._send_strm = AsyncMock()  # noqa: SLF001
+        slim_client._powered = True  # noqa: SLF001
+        return slim_client, reader
+
+    @staticmethod
+    async def _receive(reader: asyncio.StreamReader, *packets: bytes) -> None:
+        """Let the player send packets and wait until they are handled."""
+        reader.feed_data(b"".join(packets))
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    @staticmethod
+    def _buffer_ready_sent(slim_client: SlimClient) -> bool:
+        """Return whether the host was told the buffer is ready."""
+        callback: Mock = slim_client.callback  # type: ignore[assignment]
+        return call(slim_client, EventType.PLAYER_BUFFER_READY) in callback.mock_calls
+
+    @staticmethod
+    def _stream_autostart(slim_client: SlimClient) -> bytes:
+        """Return the autostart mode of the stream that was started last."""
+        strm = slim_client._send_strm.call_args.kwargs  # noqa: SLF001
+        assert strm["command"] == b"s"
+        return cast("bytes", strm["autostart"])
+
+    async def _play(
+        self,
+        player: tuple[SlimClient, asyncio.StreamReader],
+        *,
+        enqueue: bool,
+        pause: bool,
+    ) -> SlimClient:
+        """Let a track play, optionally enqueue the next one, and optionally pause."""
+        slim_client, reader = player
+        await slim_client.play_url(url=_TRACK_URL)
+        await self._receive(reader, _stat(b"STMc"), _stat(b"STMs"))
+        if enqueue:
+            await slim_client.play_url(url=_NEXT_URL, enqueue=True)
+        if pause:
+            await slim_client.pause()
+        slim_client._send_strm.reset_mock()  # noqa: SLF001
+        return slim_client
+
+    async def _decoder_ready(
+        self,
+        player: tuple[SlimClient, asyncio.StreamReader],
+        *,
+        enqueue_first: bool,
+        pause: bool,
+    ) -> SlimClient:
+        """Let the decoder finish the current track and have the next one enqueued."""
+        slim_client, reader = player
+        await self._play(player, enqueue=enqueue_first, pause=pause)
+        await self._receive(reader, _stat(b"STMd"))
+        if not enqueue_first:
+            await slim_client.play_url(url=_NEXT_URL, enqueue=True)
+        return slim_client
+
+    @pytest.mark.asyncio
+    async def test_buffer_ready_while_paused_keeps_it_paused(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """A stream paused while it buffers is not started by its buffer ready."""
+        slim_client, reader = player
+        await slim_client.play_url(url=_TRACK_URL, autostart=False)
+        await self._receive(reader, _stat(b"STMc"))
+        await slim_client.pause()
+        slim_client._send_strm.reset_mock()  # noqa: SLF001
+
+        await self._receive(reader, _stat(b"STMl"))
+
+        assert slim_client.state == PlayerState.PAUSED
+        assert not self._buffer_ready_sent(slim_client)
+        slim_client._send_strm.assert_not_called()  # noqa: SLF001
+        await slim_client.play()
+        slim_client._send_strm.assert_called_once_with(b"u", flags=0)  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enqueue_first", [True, False])
+    async def test_next_track_while_paused_waits_for_resume(
+        self, player: tuple[SlimClient, asyncio.StreamReader], *, enqueue_first: bool
+    ) -> None:
+        """The next track is buffered without autostart and plays once resumed."""
+        slim_client, reader = player
+        await self._decoder_ready(player, enqueue_first=enqueue_first, pause=True)
+
+        assert self._stream_autostart(slim_client) == b"2"
+        await self._receive(reader, _stat(b"STMc"), _stat(b"STMl"))
+        assert slim_client.state == PlayerState.PAUSED
+
+        await slim_client.play()
+        await self._receive(reader, _stat(b"STMr"), _stat(b"STMs"))
+
+        assert slim_client.state == PlayerState.PLAYING
+        assert slim_client.current_media is not None
+        assert slim_client.current_media.url == _NEXT_URL
+        assert not self._buffer_ready_sent(slim_client)
+
+    @pytest.mark.asyncio
+    async def test_resume_before_the_next_tracks_buffer_ready(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """The buffer ready of a held next track is no start once resumed."""
+        slim_client, reader = player
+        await self._decoder_ready(player, enqueue_first=True, pause=True)
+        await self._receive(reader, _stat(b"STMc"))
+        await slim_client.play()
+
+        await self._receive(reader, _stat(b"STMr"), _stat(b"STMl"))
+
+        assert slim_client.state == PlayerState.PLAYING
+        assert not self._buffer_ready_sent(slim_client)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enqueue_first", [True, False])
+    async def test_next_track_while_playing_starts_itself(
+        self, player: tuple[SlimClient, asyncio.StreamReader], *, enqueue_first: bool
+    ) -> None:
+        """A playing player gets the next track with autostart."""
+        slim_client = await self._decoder_ready(
+            player, enqueue_first=enqueue_first, pause=False
+        )
+
+        assert self._stream_autostart(slim_client) == b"3"
+
+    @pytest.mark.asyncio
+    async def test_buffer_ready_of_a_stream_without_autostart_is_reported(
+        self, player: tuple[SlimClient, asyncio.StreamReader]
+    ) -> None:
+        """The host still starts a stream it started without autostart."""
+        slim_client, reader = player
+        await slim_client.play_url(url=_TRACK_URL, autostart=False)
+
+        await self._receive(reader, _stat(b"STMc"), _stat(b"STMl"))
+
+        assert slim_client.state == PlayerState.BUFFER_READY
+        assert self._buffer_ready_sent(slim_client)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("send_flush", [True, False])
+    async def test_new_stream_while_paused_starts(
+        self, player: tuple[SlimClient, asyncio.StreamReader], *, send_flush: bool
+    ) -> None:
+        """A new stream the host starts on a paused player starts as asked."""
+        slim_client = await self._play(player, enqueue=False, pause=True)
+
+        await slim_client.play_url(url=_NEXT_URL, send_flush=send_flush)
+
+        assert self._stream_autostart(slim_client) == b"3"
 
 
 class TestStopAfterUnderrun:
