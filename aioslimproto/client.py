@@ -159,6 +159,9 @@ class SlimClient:
         self._connected: bool = False
         self._last_heartbeat = 0
         self._auto_play: bool = False
+        # set while the current stream was started without autostart behind a paused
+        # track: the output plays it once resumed, so its buffer ready is no start
+        self._start_held: bool = False
         self._reader_task = create_task(self._socket_reader())
         self._heartbeat_task: asyncio.Task | None = None
         self._presets: list[Preset] = []
@@ -677,6 +680,9 @@ class SlimClient:
             # start the track now to keep the handoff gapless instead of waiting
             # for STMu (end of playback), which would leave an audible gap
             self.logger.debug("decoder already ready - starting enqueued url now")
+            if self._state == PlayerState.PAUSED:
+                # a paused player only plays on when resumed
+                autostart = False
         self._decoder_ready = False
         self._buffering_media = media_details
         self.extra_data["playlist_timestamp"] = int(time.time())
@@ -738,6 +744,7 @@ class SlimClient:
             b"\r\n" % (path.encode(), host.encode())
         )
         self._auto_play = autostart
+        self._start_held = not autostart and self._state == PlayerState.PAUSED
         self._awaiting_stmc = self._stmc_seen
         self._stream_stmc = False
         await self._send_strm(
@@ -1383,6 +1390,9 @@ class SlimClient:
         """Process incoming stat STMl message: Buffer threshold reached."""
         self.logger.debug("STMl received - Buffer threshold reached.")
         # only sent for streams started without autostart
+        if self._state == PlayerState.PAUSED or self._start_held:
+            # not a start: the player plays the stream once resumed, or already does
+            return
         # send an event for lib consumers to handle
         self._state = PlayerState.BUFFER_READY
         self.callback(self, EventType.PLAYER_BUFFER_READY)
@@ -1406,7 +1416,8 @@ class SlimClient:
             transition=enqueued_media.transition,
             transition_duration=enqueued_media.transition_duration,
             enqueue=False,
-            autostart=True,
+            # a paused player only plays on when resumed
+            autostart=self._state != PlayerState.PAUSED,
             send_flush=False,
             stream_threshold=enqueued_media.stream_threshold,
             output_threshold=enqueued_media.output_threshold,
