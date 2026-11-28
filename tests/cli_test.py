@@ -1286,6 +1286,24 @@ class TestDeviceAlarm:
         return client
 
     @pytest.mark.asyncio
+    async def test_the_alarm_outlives_the_connection_that_set_it(self) -> None:
+        """What a client hands out is a copy, and a new client can be given it back."""
+        first = self._client()
+        first.set_alarm(next_at=1_800_000_000, days="1111100")
+        handed_over = first.alarm
+
+        assert handed_over is not None
+        handed_over["alarm_next"] = 0  # a caller must not reach into the client
+
+        second = self._client()
+        assert second.alarm is None
+        second.restore_alarm(first.alarm)
+        assert second.alarm_fields()["alarm_next"] == 1_800_000_000
+        # and it can be handed back as nothing, which clears what a client carries
+        second.restore_alarm(None)
+        assert second.alarm_fields()["alarm_state"] == "none"
+
+    @pytest.mark.asyncio
     async def test_no_alarm_is_reported_as_none(self) -> None:
         """Without an alarm both answers say so, and carry the snooze values."""
         client = self._client()

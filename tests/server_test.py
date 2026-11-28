@@ -102,3 +102,42 @@ async def test_clients_get_the_initial_power_callback() -> None:
         await server._create_client(Mock(), Mock())  # noqa: SLF001
 
     assert slim_client_cls.call_args.kwargs["initial_power"] is initial_power
+
+
+@pytest.mark.asyncio
+async def test_a_reconnecting_player_keeps_the_alarm_it_was_given() -> None:
+    """The alarm is the player's, not the socket's: a new connection keeps it."""
+    server = SlimServer(cli_port=None, cli_port_json=None, ip_address="127.0.0.1")
+    with patch("aioslimproto.server.SlimClient") as slim_client_cls:
+        await server._create_client(Mock(), Mock())  # noqa: SLF001
+    client_callback = slim_client_cls.call_args.args[2]
+    alarm = {"alarm_state": "set", "alarm_next": 1_800_000_000, "alarm_days": "1111111"}
+    first = Mock(player_id=_PLAYER_ID, connected=True, alarm=alarm)
+    client_callback(first, EventType.PLAYER_CONNECTED)
+    client_callback(first, EventType.PLAYER_DISCONNECTED)
+    await asyncio.sleep(0)
+
+    second = Mock(player_id=_PLAYER_ID, connected=True, alarm=None)
+    client_callback(second, EventType.PLAYER_CONNECTED)
+    await asyncio.sleep(0)
+
+    second.restore_alarm.assert_called_once_with(alarm)
+
+
+@pytest.mark.asyncio
+async def test_a_reconnecting_player_gets_no_alarm_it_cleared() -> None:
+    """An alarm the host cleared stays cleared: the next connection gets nothing."""
+    server = SlimServer(cli_port=None, cli_port_json=None, ip_address="127.0.0.1")
+    with patch("aioslimproto.server.SlimClient") as slim_client_cls:
+        await server._create_client(Mock(), Mock())  # noqa: SLF001
+    client_callback = slim_client_cls.call_args.args[2]
+    first = Mock(player_id=_PLAYER_ID, connected=True, alarm=None)
+    client_callback(first, EventType.PLAYER_CONNECTED)
+    client_callback(first, EventType.PLAYER_DISCONNECTED)
+    await asyncio.sleep(0)
+
+    second = Mock(player_id=_PLAYER_ID, connected=True)
+    client_callback(second, EventType.PLAYER_CONNECTED)
+    await asyncio.sleep(0)
+
+    second.restore_alarm.assert_not_called()

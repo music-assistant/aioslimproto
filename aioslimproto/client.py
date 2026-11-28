@@ -610,6 +610,27 @@ class SlimClient:
         self._alarm = None
         self.signal_update()
 
+    @property
+    def alarm(self) -> dict[str, Any] | None:
+        """Return the alarm this player keeps for itself, None when it has none.
+
+        The alarm outlives the connection that set it (the player keeps it in its own
+        RTC), so the server hands it to the client of a reconnecting player, see
+        ``restore_alarm``.
+        """
+        return None if self._alarm is None else dict(self._alarm)
+
+    def restore_alarm(self, alarm: dict[str, Any] | None) -> None:
+        """Take over the alarm of a previous connection of this player.
+
+        A client is created per connection, so without this the status document of the
+        new connection would carry ``alarm_state`` ``none`` and disarm an alarm the
+        player was keeping through a Wi-Fi drop or a server restart.
+
+        :param alarm: The alarm that connection was given, as ``alarm`` reports it.
+        """
+        self._alarm = None if alarm is None else dict(alarm)
+
     def alarm_fields(self) -> dict[str, Any]:
         """Return the alarm keys for the player status document.
 
