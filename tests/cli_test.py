@@ -85,6 +85,11 @@ def dummy_player() -> SlimClient:
             volume_set=AsyncMock(),
             muted=False,
             mute=AsyncMock(),
+            alarm_fields=lambda: {
+                "alarm_state": "none",
+                "alarm_snooze_seconds": 540,
+                "alarm_timeout_seconds": 3600,
+            },
             play=AsyncMock(),
             pause=AsyncMock(),
             toggle_pause=AsyncMock(),
@@ -1244,6 +1249,126 @@ class TestPlaylistItem:
 
         assert status["playlist_loop"][0]["type"] == "flac"
         assert status["playlist_loop"][0]["bitrate"] == "912kbps"
+
+
+class TestDeviceAlarm:
+    """The alarm the player keeps itself travels in the status document."""
+
+    @staticmethod
+    def _cli_with_alarm(client: SlimClient) -> SlimProtoCLI:
+        """Return a CLI whose only player is the given client."""
+        server = cast(
+            "SlimServer",
+            SimpleNamespace(
+                name="testserver",
+                logger=logging.getLogger(),
+                players=[client],
+                get_player=lambda player_id: (
+                    client if player_id == client.player_id else None
+                ),
+            ),
+        )
+        return SlimProtoCLI(server)
+
+    @staticmethod
+    def _client() -> SlimClient:
+        """Return a real SlimClient on a socket that reports EOF."""
+        writer = Mock()
+        writer.drain = AsyncMock()
+        writer.is_closing.return_value = False
+        writer.can_write_eof.return_value = False
+        writer.wait_closed = AsyncMock()
+        writer.get_extra_info.return_value = None
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        client = SlimClient(reader, writer, Mock())
+        client._player_id = "a5:41:d2:cd:cd:05"  # noqa: SLF001
+        return client
+
+    @pytest.mark.asyncio
+    async def test_the_alarm_outlives_the_connection_that_set_it(self) -> None:
+        """What a client hands out is a copy, and a new client can be given it back."""
+        first = self._client()
+        first.set_alarm(next_at=1_800_000_000, days="1111100")
+        handed_over = first.alarm
+
+        assert handed_over is not None
+        handed_over["alarm_next"] = 0  # a caller must not reach into the client
+
+        second = self._client()
+        assert second.alarm is None
+        second.restore_alarm(first.alarm)
+        assert second.alarm_fields()["alarm_next"] == 1_800_000_000
+        # and it can be handed back as nothing, which clears what a client carries
+        second.restore_alarm(None)
+        assert second.alarm_fields()["alarm_state"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_no_alarm_is_reported_as_none(self) -> None:
+        """Without an alarm both answers say so, and carry the snooze values."""
+        client = self._client()
+        cli = self._cli_with_alarm(client)
+
+        status = await cli._handle_status(client.player_id, "-", 2)  # noqa: SLF001
+        menu = await cli._handle_status(  # noqa: SLF001
+            client.player_id, "-", 2, menu="menu"
+        )
+
+        for answer in (status, menu):
+            assert answer["alarm_state"] == "none"
+            assert answer["alarm_snooze_seconds"] == 540
+
+    @pytest.mark.asyncio
+    async def test_a_set_alarm_reaches_both_answers(self) -> None:
+        """The menu answer must not overwrite the alarm with a hardcoded none."""
+        client = self._client()
+        next_at = int(time.time()) + 8 * 3600
+        client.set_alarm(next_at=next_at)
+        cli = self._cli_with_alarm(client)
+
+        status = await cli._handle_status(client.player_id, "-", 2)  # noqa: SLF001
+        menu = await cli._handle_status(  # noqa: SLF001
+            client.player_id, "-", 2, menu="menu"
+        )
+
+        for answer in (status, menu):
+            assert answer["alarm_state"] == "set"
+            assert answer["alarm_next2"] == next_at
+            assert answer["alarm_next"] == next_at
+            assert answer["alarm_version"] == 2
+            assert answer["alarm_repeat"] == 1
+            assert answer["alarm_days"] == "1111111"
+
+    @pytest.mark.asyncio
+    async def test_clearing_reports_none_again(self) -> None:
+        """Clearing is how a player that is already armed is disarmed."""
+        client = self._client()
+        client.set_alarm(next_at=int(time.time()) + 60)
+        client.clear_alarm()
+        cli = self._cli_with_alarm(client)
+
+        status = await cli._handle_status(client.player_id, "-", 2)  # noqa: SLF001
+
+        assert status["alarm_state"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_a_single_day_mask_is_the_weekday_of_the_alarm(self) -> None:
+        """A one-shot alarm sends one set day, Sunday first."""
+        client = self._client()
+
+        client.set_alarm(next_at=int(time.time()) + 60, repeat=False, days="0100000")
+
+        assert client.alarm_fields()["alarm_days"] == "0100000"
+        assert client.alarm_fields()["alarm_repeat"] == 0
+
+    @pytest.mark.parametrize("days", ["111111", "11111111", "1111a11", ""])
+    @pytest.mark.asyncio
+    async def test_a_mask_that_is_not_seven_flags_is_refused(self, days: str) -> None:
+        """A malformed mask is a caller error, not something to send to a player."""
+        client = self._client()
+
+        with pytest.raises(ValueError, match="seven characters"):
+            client.set_alarm(next_at=int(time.time()) + 60, days=days)
 
 
 class TestPushPopups:

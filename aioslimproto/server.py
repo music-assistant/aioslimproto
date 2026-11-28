@@ -93,6 +93,9 @@ class SlimServer:
         self._server: asyncio.Server | None = None
         self._discovery: asyncio.BaseTransport | None = None
         self._players: dict[str, SlimClient] = {}
+        # the alarms players keep for themselves, per player id: they outlive the
+        # connection that set them, see SlimClient.restore_alarm
+        self._alarms: dict[str, dict[str, Any]] = {}
 
     @property
     def players(self) -> list[SlimClient]:
@@ -215,6 +218,12 @@ class SlimServer:
                 # a socket that never got registered must not drop the one that did
                 if self._players.get(player_id) is not client:
                     return
+                # keep the alarm over the outage: the player goes on keeping its own
+                # one, and the status document of the next connection would clear it
+                if (alarm := client.alarm) is not None:
+                    self._alarms[player_id] = alarm
+                else:
+                    self._alarms.pop(player_id, None)
                 del self._players[player_id]
 
             if event_type == EventType.PLAYER_CONNECTED:
@@ -231,6 +240,8 @@ class SlimServer:
                     existing.disconnect()
 
                 self._players[player_id] = client
+                if (alarm := self._alarms.get(player_id)) is not None:
+                    client.restore_alarm(alarm)
 
             # forward all other events as-is
             self.signal_event(SlimEvent(event_type, player_id, data))
